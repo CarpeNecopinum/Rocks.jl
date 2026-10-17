@@ -1,5 +1,5 @@
-# Effects and timers: a clock driven by use_interval, demonstrating
-# useEffect with dependencies and use_timeout.
+# Effects and timers: a clock driven by useInterval, demonstrating
+# useEffect with dependencies and useTimeout.
 #
 #   julia --project examples/clock.jl
 
@@ -15,7 +15,7 @@ function App()
     useEffect(() -> println("clock started at ", Dates.now()), ())
 
     # tick every second
-    use_interval(() -> set_now(Dates.now()), 1000)
+    useInterval(() -> set_now(Dates.now()), 1000)
 
     # runs whenever `now` changes
     useEffect(() -> println("second passed: ", Dates.format(now, "HH:MM:SS")), (now,))

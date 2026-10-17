@@ -52,7 +52,7 @@ include("components.jl")
 export @rock, render, quit!,
        Window, Box, Text, Pressable, Row, Column,
        useState, useEffect, useRef, useMemo, useCallback,
-       use_interval, use_timeout,
+       useInterval, useTimeout,
        set_default_font!, load_font
 
 end # module

@@ -43,7 +43,7 @@ end
   mount, `(x,)` = when `x` changes; `f` may return a cleanup function.
 - `useRef(v)` — mutable `.current`, survives re-renders silently.
 - `useMemo(f, deps)` / `useCallback(f, deps)`.
-- `use_interval(f, ms)` / `use_timeout(f, ms)` — auto-cleaned on unmount.
+- `useInterval(f, ms)` / `useTimeout(f, ms)` — auto-cleaned on unmount.
 - Hooks must be called unconditionally at the top level of a component
   (React rules apply).
 
@@ -74,4 +74,4 @@ Styling is manual (React-Native style): sizes are pixels, colors are tuples
 Headless (no display needed): set `ENV["SDL_VIDEODRIVER"] = "dummy"` before
 SDL initializes; render into a fiber tree with `Rocks.create_root` +
 `Rocks.perform_render!`, or run the full `render(App)` with a
-`use_timeout(quit!, ms)`.
+`useTimeout(quit!, ms)`.

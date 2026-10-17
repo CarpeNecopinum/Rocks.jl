@@ -29,7 +29,10 @@ src/
 
 Render cycle: SDL events → setState marks the app dirty → re-render the tree
 (component functions re-run, fibers reconciled in place) → run pending
-effects → measure/place layout → draw every window.
+effects → measure/place layout — then draw every window every frame.
+Rendering and drawing are decoupled: components only re-run when the app is
+dirty, while the current visual state is presented every frame so window
+damage (occlusion, off-screen movement) redraws immediately.
 
 ## Build & Test
 

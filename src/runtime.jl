@@ -69,7 +69,9 @@ called). `app` is either
 
 The render loop: poll and dispatch SDL events → fire due timers → if dirty,
 re-render the tree (component functions re-run, fibers are reconciled), run
-pending effects, lay out and draw every window.
+pending effects and lay out — then draw every window every frame. Drawing is
+decoupled from rendering, so window damage (occlusion, off-screen movement)
+is redrawn immediately without waiting for a state update.
 
 Note: like `ReactDOM.render`. `Rocks.run` is available as a qualified alias
 if you prefer React's naming (`using Rocks` makes plain `run` ambiguous with
@@ -86,6 +88,7 @@ function render(app; kwargs...)
         perform_render!(root)
         run_effects!()
         event = Ref{SDL_Event}()
+        windows = Fiber[]
         while RUNNING[]
             if SDL_WaitEventTimeout(event, 16) == 1
                 dispatch_event!(event[])
@@ -96,9 +99,12 @@ function render(app; kwargs...)
             fire_timers!()
             if DIRTY[]
                 DIRTY[] = false
+                # Rendering (component functions, reconciliation, effects,
+                # layout) only happens when the application is dirty.
                 perform_render!(root)
                 run_effects!()
-                windows = collect_windows!(Fiber[], root)
+                empty!(windows)
+                collect_windows!(windows, root)
                 for w in windows
                     w.host isa WindowState || create_window!(w)
                     sync_window!(w)
@@ -107,9 +113,12 @@ function render(app; kwargs...)
                     measure!(w)
                     place!(w, 0.0, 0.0)
                 end
-                for w in windows
-                    w.hidden || draw_window!(w)
-                end
+            end
+            # Drawing is decoupled from rendering: every frame is presented,
+            # so damage from window occlusion or off-screen movement is
+            # redrawn immediately, not just on the next state update.
+            for w in windows
+                w.hidden || draw_window!(w)
             end
         end
     finally

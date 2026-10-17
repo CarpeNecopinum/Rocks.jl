@@ -93,13 +93,13 @@ conditional hooks), exactly like React.
 | `useEffect(f, deps = nothing)` | Side effects after render. `nothing` = every render, `()` = once on mount, `(x,)` = when `x` changes. Return a cleanup function from `f`. |
 | `useRef(initial)` | Mutable box (`.current`) that survives re-renders without triggering them. |
 | `useMemo(f, deps)` / `useCallback(f, deps)` | Memoization. |
-| `use_interval(f, ms)` / `use_timeout(f, ms)` | Timers, cleaned up automatically on unmount. |
+| `useInterval(f, ms)` / `useTimeout(f, ms)` | Timers, cleaned up automatically on unmount. |
 
 ```julia
 function Stopwatch()
     elapsed, set_elapsed = useState(0)
     running, set_running = useState(false)
-    useEffect(() -> running && use_interval(() -> set_elapsed(e -> e + 1), 1000))
+    useEffect(() -> running && useInterval(() -> set_elapsed(e -> e + 1), 1000))
     ...
 end
 ```

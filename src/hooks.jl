@@ -227,27 +227,27 @@ function fire_timers!()
 end
 
 """
-    use_interval(f, ms)
+    useInterval(f, ms)
 
 Calls `f()` every `ms` milliseconds while the component is mounted. The
 interval is cancelled automatically on unmount.
 
 ```julia
 now, set_now = useState(Dates.now())
-use_interval(() -> set_now(Dates.now()), 1000)
+useInterval(() -> set_now(Dates.now()), 1000)
 ```
 """
-function use_interval(f::Function, ms::Real)
+function useInterval(f::Function, ms::Real)
     useEffect(() -> add_timer(f, ms; repeating = true), (ms,))
     return nothing
 end
 
 """
-    use_timeout(f, ms)
+    useTimeout(f, ms)
 
 Calls `f()` once after `ms` milliseconds (if the component is still mounted).
 """
-function use_timeout(f::Function, ms::Real)
+function useTimeout(f::Function, ms::Real)
     useEffect(() -> add_timer(f, ms; repeating = false), (ms,))
     return nothing
 end

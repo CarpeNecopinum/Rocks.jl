@@ -189,8 +189,8 @@ function handle_close!(wid)
         quit!()
         return
     end
-    # Hide the window; the fiber stays mounted and is shown again when its
-    # element is re-rendered.
+    # Hide the window; the fiber stays mounted. It becomes visible again only
+    # when the component rendering it remounts (a fresh fiber is created).
     if fiber.host isa WindowState
         SDL_HideWindow(fiber.host.ptr)
         fiber.hidden = true

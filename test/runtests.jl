@@ -250,8 +250,8 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         renders = Ref(0)
         ticks = Ref(0)
         function App()
-            use_timeout(quit!, 250)
-            use_interval(() -> (ticks[] += 1), 50)
+            useTimeout(quit!, 250)
+            useInterval(() -> (ticks[] += 1), 50)
             renders[] += 1
             @rock(Window, @rock(Text, "ticks: ", ticks[]); title = "t", width = 200, height = 100)
         end
