@@ -320,6 +320,36 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         end
     end
 
+    @testset "pressable styling" begin
+        function App()
+            @rock(Window,
+                @rock(Pressable,
+                    @rock(Text, "btn");
+                    background = (0.2, 0.45, 0.95),
+                    hover_background = (0.25, 0.52, 1.0),
+                    pressed_background = (0.16, 0.38, 0.82),
+                    padding = 10);
+                title = "styling", width = 200, height = 100)
+        end
+        with_tree(App) do root
+            w = sync_windows!(root)[1]
+            pressable = w.children[1]
+            @test Rocks.background_for(pressable) == (0.2, 0.45, 0.95)
+
+            # drawing in every state must not error (hover styling used to
+            # crash the draw pass)
+            Rocks.draw_window!(w)
+            pressable.host.hovered = true
+            @test Rocks.background_for(pressable) == (0.25, 0.52, 1.0)
+            Rocks.draw_window!(w)
+            pressable.host.pressed = true
+            @test Rocks.background_for(pressable) == (0.16, 0.38, 0.82)
+            Rocks.draw_window!(w)
+            pressable.host.hovered = false
+            @test Rocks.background_for(pressable) == (0.16, 0.38, 0.82)
+        end
+    end
+
     @testset "multi-window" begin
         function Dialog(; children = Any[])
             @rock(Window, @rock(Text, "dialog"); title = "Dialog", width = 250, height = 150)

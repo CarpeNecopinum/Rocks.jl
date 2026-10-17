@@ -278,9 +278,9 @@ function background_for(fiber)
         pressed = fiber.host.pressed
         hovered = fiber.host.hovered
         if pressed && haskey(props, :pressed_background)
-            return get(props, :pressed_background)
+            return get(props, :pressed_background, nothing)
         elseif hovered && haskey(props, :hover_background)
-            return get(props, :hover_background)
+            return get(props, :hover_background, nothing)
         end
     end
     return get(props, :background, nothing)
