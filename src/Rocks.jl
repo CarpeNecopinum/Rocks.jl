@@ -1,0 +1,58 @@
+"""
+    Rocks
+
+A React(Native)-style GUI framework for Julia built on SDL2
+(via [SimpleDirectMediaLayer.jl](https://github.com/JuliaMultimedia/SimpleDirectMediaLayer.jl)).
+
+Components are plain Julia functions — there is no separate component language.
+The [`@rock`](@ref) macro plays the role of React's (usually JSX-hidden)
+`createElement` call: children are passed as positional varargs, props as
+keyword arguments.
+
+```julia
+using Rocks
+
+function Counter()
+    count, set_count = useState(0)
+    @rock(Window,
+        @rock(Text, "Count: ", count; size = 28),
+        @rock(Pressable,
+            @rock(Text, "Increment");
+            on_press = () -> set_count(c -> c + 1));
+        title = "Counter", width = 320, height = 200,
+        padding = 20, gap = 16)
+end
+
+run(Counter)
+```
+
+Windows are components like everything else: rendering a tree with several
+`Window` elements gives a multi-window application, and components can open
+dialogs by conditionally rendering a `Window`.
+
+Styling is deliberately left to the user (React-Native style). Rocks only
+provides the primitives: [`Window`](@ref), [`Box`](@ref), [`Text`](@ref) and
+[`Pressable`](@ref).
+"""
+module Rocks
+
+using SimpleDirectMediaLayer
+using SimpleDirectMediaLayer.LibSDL2
+using ColorTypes
+
+include("element.jl")
+include("hooks.jl")
+include("fiber.jl")
+include("backend.jl")
+include("layout.jl")
+include("events.jl")
+include("runtime.jl")
+include("components.jl")
+
+export @rock, render, quit!,
+       Window, Box, Text, Pressable, Row, Column,
+       useState, useEffect, useRef, useMemo, useCallback,
+       use_interval, use_timeout,
+       set_default_font!, load_font
+
+end # module

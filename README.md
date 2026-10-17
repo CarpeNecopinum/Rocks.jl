@@ -1,0 +1,195 @@
+# Rocks.jl
+
+A React(Native)-style GUI framework for Julia, built on SDL2 (via
+[SimpleDirectMediaLayer.jl](https://github.com/JuliaMultimedia/SimpleDirectMediaLayer.jl)).
+
+Components are plain Julia functions — there is no separate component
+language and no JSX-like sublanguage. The [`@rock`](@ref) macro plays the
+role of React's (usually hidden) `createElement` call: children are passed
+as positional varargs, props as keyword arguments. Hook functions track the
+lifecycle of a component between renders. Windows are components like
+everything else, which makes multi-window applications and dialogs just
+conditional rendering.
+
+```julia
+using Rocks
+import Rocks: Text # disambiguate Rocks.Text from Base.Text
+
+function Counter()
+    count, set_count = useState(0)
+    @rock(Window,
+        @rock(Text, "Count: ", count; size = 32),
+        @rock(Pressable,
+            @rock(Text, "Increment");
+            on_press = () -> set_count(c -> c + 1),
+            background = (0.20, 0.45, 0.95),
+            padding = 12, align = :center);
+        title = "Counter", width = 380, height = 180,
+        padding = 24, gap = 20)
+end
+
+render(Counter)
+```
+
+## Installation
+
+```julia
+pkg> add SimpleDirectMediaLayer   # SDL2 bindings (dependency of Rocks)
+pkg> dev /path/to/Rocks.jl        # Rocks is currently not registered
+```
+
+On Linux you may need `ALSA_CONFIG_PATH=/usr/share/alsa/alsa.conf` in your
+environment (see [Yggdrasil#1432](https://github.com/JuliaPackaging/Yggdrasil/issues/1432)).
+
+## Concepts
+
+### Components are functions
+
+A component is any Julia function that accepts its props as keyword
+arguments and returns an element (or a tuple/vector of elements, `nothing`,
+or a string which becomes text):
+
+```julia
+function Greeting(; name, children = Any[])
+    @rock(Column,
+        @rock(Text, "Hello, ", name, "!"),
+        children...;
+        gap = 8)
+end
+
+@rock(Greeting; name = "World")
+```
+
+Components re-run on every re-render of their subtree. `children` is passed
+as a keyword argument (only when non-empty), so child-less components do not
+need to declare it.
+
+### Elements and the @rock macro
+
+`@rock(kind, children...; props...)` creates an element:
+
+```julia
+@rock(Box,
+    @rock(Text, "Hello, ", name),              # values are interpolated as text
+    @rock(Pressable, @rock(Text, "Press me"); on_press = () -> println("hi"));
+    direction = :row, padding = 8)             # props as keyword arguments
+```
+
+`kind` is either one of the built-in host elements (`Window`, `Box`, `Text`,
+`Pressable`) or a component function. Strings, numbers and other values used
+as children are stringified and concatenated (they become text), and
+`nothing`/`false` children are skipped — so `cond && @rock(...)` conditional
+rendering works like in JSX.
+
+### Hooks
+
+Hooks may only be called from component functions, and the number and order
+of hook calls must be the same on every render (top level only — no
+conditional hooks), exactly like React.
+
+| Hook | Purpose |
+| --- | --- |
+| `useState(initial)` | State; returns `(value, setter)`. The setter takes a value or an updater function. |
+| `useEffect(f, deps = nothing)` | Side effects after render. `nothing` = every render, `()` = once on mount, `(x,)` = when `x` changes. Return a cleanup function from `f`. |
+| `useRef(initial)` | Mutable box (`.current`) that survives re-renders without triggering them. |
+| `useMemo(f, deps)` / `useCallback(f, deps)` | Memoization. |
+| `use_interval(f, ms)` / `use_timeout(f, ms)` | Timers, cleaned up automatically on unmount. |
+
+```julia
+function Stopwatch()
+    elapsed, set_elapsed = useState(0)
+    running, set_running = useState(false)
+    useEffect(() -> running && use_interval(() -> set_elapsed(e -> e + 1), 1000))
+    ...
+end
+```
+
+### Windows are components
+
+A render tree may contain any number of `Window` elements — each becomes a
+real SDL window. Multi-window apps and dialogs are just conditional
+rendering:
+
+```julia
+function App()
+    open, set_open = useState(false)
+    @rock(Window,
+        @rock(Pressable, @rock(Text, "Open dialog"); on_press = () -> set_open(true));
+        title = "Main", width = 400, height = 300,
+        open && @rock(Dialog))
+end
+
+function Dialog()
+    @rock(Window, @rock(Text, "I am a dialog"); title = "Dialog", width = 300, height = 150)
+end
+```
+
+Window props: `title`, `width`, `height`, `resizable`, `x`/`y` (position),
+`background`, plus layout props and the callbacks `on_key(key)`,
+`on_text_input(text)` and `on_close()`. Returning `false` from `on_close`
+keeps the window open; without `on_close`, clicking the X hides the window
+(or quits if it is the last visible one). `quit!()` closes all windows and
+makes `render` return.
+
+### Built-in elements
+
+Akin to React Native, styling is left to the user. Rocks only provides
+primitives:
+
+* **`Window`** — an OS window.
+* **`Box`** — a rectangular container with an optional `background`,
+  `border_color`/`border_width`, that lays out its children in a `:column`
+  (default) or `:row` `direction` with `gap`, `padding` and cross-axis
+  `align` (`:start`, `:center`, `:end`). Fixed `width`/`height` override the
+  natural size; `position = :absolute` with `x`/`y` places a child manually.
+  `Row`/`Column` are convenience components for directional boxes.
+* **`Text`** — stringified children rendered with a TTF font. Props: `size`,
+  `color`, `font`. Multi-line text uses `"\\n"`; the default font is
+  auto-discovered (or set with `Rocks.set_default_font!(path)`, the
+  `ROCKS_FONT` environment variable, or the `font` prop).
+* **`Pressable`** — lays out and draws like a `Box`, but participates in
+  pointer events. Props: `on_press`, `on_press_in`, `on_press_out`,
+  `on_hover_in`, `on_hover_out`, `disabled`, and `background`,
+  `hover_background`, `pressed_background` for state-dependent styling.
+
+Colors are tuples of 3–4 numbers (all-integer → 0–255, any-float → 0–1),
+hex strings (`"#f00"`, `"#00ff00"`, `"#rrggbbaa"`) or ColorTypes colors.
+
+## Rendering model
+
+State updates mark the application dirty; the main loop then re-renders the
+tree (component functions re-run, the reconciler updates persistent fibers
+in place), runs pending effects, lays out each window and draws it. Events
+are dispatched to the deepest fiber under the pointer, bubbling up to the
+nearest `Pressable` ancestor.
+
+## Examples
+
+See [`examples/`](examples/): `counter.jl`, `clock.jl`, `multiwindow.jl`
+and `dialog.jl`.
+
+```shell
+julia --project examples/counter.jl
+```
+
+## Testing
+
+The test suite runs headless (SDL's dummy video driver), so it works without
+a display:
+
+```shell
+julia --project -e 'using Pkg; Pkg.test()'
+```
+
+## Roadmap
+
+* Keyed list reconciliation (full reordering support; `key` currently guards
+  index slots only)
+* Text wrapping, text input fields, scrolling
+* Fractional layout: flexbox-style growing/shrinking (`flex` props)
+* Custom drawing (canvas escape hatch), images
+* Window-level `on_focus`/`on_resize` callbacks
+
+## License
+
+MIT — see [LICENSE](LICENSE).

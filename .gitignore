@@ -1,0 +1,15 @@
+# Julia
+Manifest.toml
+
+# Editor/OS
+.DS_Store
+*.swp
+*~
+
+# Coverage
+*.jl.cov
+*.jl.*.cov
+*.cov
+
+# Local agent workspaces (keep .agents versioned, ignore scratch)
+.agents/.backups/
