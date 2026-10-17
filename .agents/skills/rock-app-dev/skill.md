@@ -50,8 +50,13 @@ end
 ## Windows
 
 Windows are components: render `@rock(Window, children...; title, width,
-height, resizable, background, on_key, on_text_input, on_close)` anywhere in
-the tree. Multiple windows = multi-window app; `open && @rock(Dialog)` opens
+height, resizable, background, position, display, x, y, on_key,
+on_text_input, on_close)` anywhere in the tree. Positioning: `position` is
+`:cascade` (default; centered + cascade offset per open window), `:centered`
+(exactly centered), `:manual` (exact `x`/`y`) or `:mouse` (top-left at the
+pointer); `display` picks the display for centered modes (`nothing` = the
+display the pointer is on); giving `x`/`y` without `position` implies
+`:manual`. Multiple windows = multi-window app; `open && @rock(Dialog)` opens
 a dialog. `quit!()` closes all windows.
 
 ## Built-in elements

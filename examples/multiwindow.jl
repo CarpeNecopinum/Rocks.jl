@@ -10,8 +10,7 @@ function SecondWindow()
     @rock(Window,
         @rock(Text, "I am a second window.");
         title = "Second window", width = 280, height = 140,
-        padding = 20,
-        x = 700, y = 300) # open somewhere next to the main window
+        padding = 20) # positioned next to the main window automatically
 end
 
 function App()
@@ -35,7 +34,7 @@ function App()
             padding = 12, align = :center);
         title = "Main window", width = 340, height = 260,
         padding = 24, gap = 16,
-        open && @rock(SecondWindow()))
+        open && @rock(SecondWindow))
 end
 
 render(App)

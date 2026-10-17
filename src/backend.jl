@@ -176,26 +176,79 @@ end
 
 # ---- windows -------------------------------------------------------------
 
-function window_props(fiber)
+# Compute a reasonable position for a new window according to its
+# positioning props:
+#
+# * `position = :cascade` (default) — centered on the chosen display with a
+#   cascade offset per already-open window, so multiple windows don't stack
+#   exactly on top of each other.
+# * `position = :centered` — exactly centered on the chosen display.
+# * `position = :manual` — exact `x`/`y`.
+# * `position = :mouse` — top-left corner at the current pointer position.
+#
+# `display` selects the display for the centered modes (`nothing`, the
+# default, means the display the pointer is on). Giving `x`/`y` without a
+# `position` implies `:manual`.
+function window_position(fiber)
     props = fiber.props
-    title = string(get(props, :title, "Rocks"))
-    width = Int(get(props, :width, 800))
-    height = Int(get(props, :height, 600))
-    resizable = Bool(get(props, :resizable, false))
-    return title, width, height, resizable
+    position = if haskey(props, :position)
+        Symbol(props[:position])
+    elseif haskey(props, :x) || haskey(props, :y)
+        :manual
+    else
+        :cascade
+    end
+    width, height = window_size(fiber)
+
+    if position === :manual
+        return (Int(get(props, :x, 0)), Int(get(props, :y, 0)))
+    elseif position === :mouse
+        mx, my = Ref{Cint}(0), Ref{Cint}(0)
+        SDL_GetMouseState(mx, my)
+        return (Int(mx[]), Int(my[]))
+    end
+
+    bx, by, bw, bh = display_bounds(get(props, :display, nothing))
+    (bw <= 0 || bh <= 0) && return (SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED)
+    cascade = position === :cascade ? 32 * (length(WINDOW_BY_ID) % 8) : 0
+    x = bx + max(0, bw - width) ÷ 2 + cascade
+    y = by + max(0, bh - height) ÷ 2 + cascade
+    return (x, y)
 end
 
+# Bounds (x, y, w, h) of a display: `nothing` selects the display the mouse
+# pointer is on (falling back to display 0). Returns (0, 0, 0, 0) when the
+# display cannot be queried (e.g. headless drivers).
+function display_bounds(display)
+    if display === nothing
+        mx, my = Ref{Cint}(0), Ref{Cint}(0)
+        SDL_GetMouseState(mx, my)
+        index = SDL_GetPointDisplayIndex(Ref(SDL_Point(mx[], my[])))
+        index = index < 0 ? 0 : index
+    else
+        index = Int(display)
+    end
+    bounds = Ref(SDL_Rect(0, 0, 0, 0))
+    if SDL_GetDisplayBounds(index, bounds) == 0
+        return (bounds[].x, bounds[].y, bounds[].w, bounds[].h)
+    end
+    mode = Ref(SDL_DisplayMode(0, 0, 0, 0, C_NULL))
+    if SDL_GetDesktopDisplayMode(index, mode) == 0
+        return (0, 0, mode[].w, mode[].h)
+    end
+    return (0, 0, 0, 0)
+end
+
+window_size(fiber) =
+    (Int(get(fiber.props, :width, 800)), Int(get(fiber.props, :height, 600)))
+
 function create_window!(fiber)
-    title, width, height, resizable = window_props(fiber)
+    title = string(get(fiber.props, :title, "Rocks"))
+    width, height = window_size(fiber)
+    resizable = Bool(get(fiber.props, :resizable, false))
     flags = UInt32(SDL_WINDOW_SHOWN)
     resizable && (flags |= UInt32(SDL_WINDOW_RESIZABLE))
-    if haskey(fiber.props, :x) || haskey(fiber.props, :y)
-        xpos = Int(get(fiber.props, :x, SDL_WINDOWPOS_CENTERED))
-        ypos = Int(get(fiber.props, :y, SDL_WINDOWPOS_CENTERED))
-    else
-        xpos = SDL_WINDOWPOS_CENTERED
-        ypos = SDL_WINDOWPOS_CENTERED
-    end
+    xpos, ypos = window_position(fiber)
     ptr = SDL_CreateWindow(title, xpos, ypos, width, height, flags)
     ptr == C_NULL && error("SDL_CreateWindow failed: $(unsafe_string(SDL_GetError()))")
     renderer = SDL_CreateRenderer(
@@ -228,7 +281,8 @@ end
 function sync_window!(fiber)
     fiber.host isa WindowState || return
     state = fiber.host
-    title, _, _, resizable = window_props(fiber)
+    title = string(get(fiber.props, :title, "Rocks"))
+    resizable = Bool(get(fiber.props, :resizable, false))
     current = unsafe_string(SDL_GetWindowTitle(state.ptr))
     current != title && SDL_SetWindowTitle(state.ptr, title)
     want = resizable ? SDL_TRUE : SDL_FALSE

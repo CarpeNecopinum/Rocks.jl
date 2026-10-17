@@ -27,12 +27,24 @@ else: a render tree may contain any number of `Window` elements, which turns
 into a multi-window application, and a component may conditionally render a
 `Window` to open a dialog.
 
-Props: `title`, `width`, `height`, `resizable`, `background`, `x`, `y`
-(window position; defaults to centered), plus the layout props shared with
-[`Box`](@ref) (`padding`, `gap`, `direction`, `align`) which control how the
-window's children are laid out, and the callbacks `on_key(key)`,
-`on_text_input(text)` and `on_close()` (return `false` from `on_close` to
-keep the window open).
+Props: `title`, `width`, `height`, `resizable`, `background`, plus the
+positioning props `position`, `display`, `x` and `y`:
+
+* `position = :cascade` (default) — centered on the chosen display with a
+  cascade offset per already-open window, so multiple windows don't stack
+  exactly on top of each other.
+* `position = :centered` — exactly centered on the chosen display.
+* `position = :manual` — top-left corner at exactly `x`/`y`.
+* `position = :mouse` — top-left corner at the current pointer position.
+
+`display` selects the display index for the centered modes (`nothing`, the
+default, means the display the pointer is currently on). Giving `x`/`y`
+without a `position` implies `:manual`.
+
+The layout props shared with [`Box`](@ref) (`padding`, `gap`, `direction`,
+`align`) control how the window's children are laid out, and the callbacks
+`on_key(key)`, `on_text_input(text)` and `on_close()` (return `false` from
+`on_close` to keep the window open) are also supported.
 """
 const Window = _WindowKind()
 
@@ -116,6 +128,16 @@ keyword arguments.
     direction = :row, padding = 8)
 ```
 
+Children may also be written after the semicolon, intermixed with props —
+which makes trailing conditional rendering read naturally:
+
+```julia
+@rock(Window,
+    @rock(Text, "Main window");
+    title = "Main", width = 340,
+    open && @rock(SecondWindow))
+```
+
 Strings, numbers and other values used as children are stringified and
 concatenated (they become text). `nothing` and `false` children are skipped,
 which makes conditional rendering (`cond && @rock(...)`) work like in JSX.
@@ -123,12 +145,20 @@ which makes conditional rendering (`cond && @rock(...)`) work like in JSX.
 macro rock(args...)
     prop_kw = Any[]
     pos = Any[]
+    trailing = Any[] # non-assignment expressions after `;` are children too
     for a in args
         if a isa Expr && a.head === :parameters
-            # `@rock(kind, children...; props...)` — kwargs arrive wrapped in
-            # an Expr(:parameters, ...) passed as the first argument.
+            # `@rock(kind, children...; props...)` — the post-`;` expressions
+            # arrive wrapped in an Expr(:parameters, ...) as the first
+            # argument. `name = value` items and `splats...` are props;
+            # everything else (e.g. `open && @rock(SecondWindow)`) is a child.
             for kw in a.args
-                push!(prop_kw, kw)
+                if kw isa Expr && (kw.head === :kw || (kw.head === :(=) && kw.args[1] isa Symbol) ||
+                                   kw.head === :...)
+                    push!(prop_kw, kw)
+                else
+                    push!(trailing, kw)
+                end
             end
         elseif a isa Expr && a.head === :kw
             push!(prop_kw, a)
@@ -141,10 +171,17 @@ macro rock(args...)
     end
     isempty(pos) && error("@rock needs a kind: a host element kind (Window, Box, Text, Pressable) or a component function")
     kind = popfirst!(pos)
-    children = [esc(c) for c in pos]
-    prop_kw = [Expr(:kw, kw.args[1], esc(kw.args[2])) for kw in prop_kw]
+    children = [esc(c) for c in [pos..., trailing...]]
+    # Direct props become keyword arguments of props_dict; splats go into the
+    # keyword slot too, so both NamedTuples and Pair iterators splat as props.
+    prop_args = Any[Expr(:kw, kw.args[1], esc(kw.args[2])) for kw in prop_kw if !(kw isa Expr && kw.head === :...)]
+    prop_splats = Any[Expr(:..., esc(kw.args[1])) for kw in prop_kw if kw isa Expr && kw.head === :...]
+    call = Expr(:call, :props_dict)
+    # In a call AST the keyword-parameters expression comes before the args.
+    isempty(prop_splats) || push!(call.args, Expr(:parameters, prop_splats...))
+    append!(call.args, prop_args)
     return quote
-        Element($(esc(kind)), props_dict($(prop_kw...)), Any[$(children...)])
+        Element($(esc(kind)), $call, Any[$(children...)])
     end
 end
 

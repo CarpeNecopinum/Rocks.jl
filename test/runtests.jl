@@ -5,6 +5,8 @@ using SimpleDirectMediaLayer.LibSDL2:
     SDL_PollEvent,
     SDL_PushEvent,
     SDL_GetWindowTitle,
+    SDL_GetWindowPosition,
+    SDL_GetMouseState,
     SDL_SCANCODE_ESCAPE,
     SDLK_ESCAPE
 import Rocks: Text, Element, Window, Box, Pressable, Row, Column
@@ -121,6 +123,21 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         # keys are stored as props
         el = @rock(Text, "x"; key = "k1", color = (1, 0, 0))
         @test el.props[:key] == "k1"
+
+        # calling the component inside @rock produces a helpful error
+        function SecondWindow()
+            @rock(Window, @rock(Text, "second"); title = "Second")
+        end
+        broken_el = @rock(SecondWindow())
+        @test_throws "but got an already-created Element. The element already " *
+                     "describes a `Window` — did you call a component inside " *
+                     "`@rock`" Rocks.create_fiber(broken_el, nothing)
+
+        # splatted props after the semicolon (`kwargs...` idiom)
+        extra = (x = 7, y = 9)
+        el = @rock(Window, @rock(Text, "a"); title = "t", extra...)
+        @test el.props[:x] == 7 && el.props[:y] == 9 && el.props[:title] == "t"
+        @test length(el.children) == 1 # the splat must not become children
     end
 
     @testset "components" begin
@@ -452,6 +469,64 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             @test 0 <= Rocks.event_wait_timeout_ms() <= 50
             empty!(Rocks.TIMERS)
             @test Rocks.event_wait_timeout_ms() == 250
+        end
+    end
+
+    @testset "window positioning" begin
+        # NOTE: the dummy video driver ignores requested positions (it centers
+        # and cascades windows itself), so these tests assert the positions
+        # Rocks *requests* (`window_position`), which is the logic under test.
+        Rocks.RUNNING[] = true
+        Rocks.init_backend()
+        try
+            function window_fiber(; kwargs...)
+                el = @rock(Window, @rock(Text, "x"); title = "pos", width = 200, height = 100, kwargs...)
+                f = Rocks.create_fiber(el, nothing)
+                Rocks.perform_render!(f)
+                f
+            end
+
+            # x/y without position implies :manual
+            f1 = window_fiber(x = 123, y = 45)
+            @test Rocks.window_position(f1) == (123, 45)
+
+            # explicit :manual
+            f2 = window_fiber(position = :manual, x = 50, y = 60)
+            @test Rocks.window_position(f2) == (50, 60)
+
+            # :mouse puts the top-left corner at the pointer
+            f3 = window_fiber(position = :mouse)
+            mx, my = Ref{Cint}(0), Ref{Cint}(0)
+            SDL_GetMouseState(mx, my)
+            @test Rocks.window_position(f3) == (Int(mx[]), Int(my[]))
+
+            # :centered places the window in the middle of the display bounds
+            f4 = window_fiber(position = :centered)
+            bx, by, bw, bh = Rocks.display_bounds(nothing)
+            @test Rocks.window_position(f4) ==
+                  (bx + (bw - 200) ÷ 2, by + (bh - 100) ÷ 2)
+
+            # :cascade offsets successive windows by 32px
+            f5 = window_fiber(position = :cascade)
+            p5 = Rocks.window_position(f5)
+            Rocks.create_window!(f5)
+            f6 = window_fiber(position = :cascade)
+            p6 = Rocks.window_position(f6)
+            Rocks.create_window!(f6)
+            @test p6[1] - p5[1] == 32
+            @test p6[2] - p5[2] == 32
+
+            # explicit display index is honored
+            f7 = window_fiber(position = :centered, display = 0)
+            @test Rocks.window_position(f7) ==
+                  (bx + (bw - 200) ÷ 2, by + (bh - 100) ÷ 2)
+
+            for f in (f5, f6)
+                Rocks.destroy_window!(f)
+            end
+        finally
+            Rocks.RUNNING[] = false
+            Rocks.shutdown_backend()
         end
     end
 

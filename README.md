@@ -79,7 +79,15 @@ need to declare it.
 `Pressable`) or a component function. Strings, numbers and other values used
 as children are stringified and concatenated (they become text), and
 `nothing`/`false` children are skipped — so `cond && @rock(...)` conditional
-rendering works like in JSX.
+rendering works like in JSX. Children may also be written after the
+semicolon, intermixed with props:
+
+```julia
+@rock(Window,
+    @rock(Text, "Main window");
+    title = "Main", width = 340,
+    open && @rock(SecondWindow))
+```
 
 ### Hooks
 
@@ -124,8 +132,13 @@ function Dialog()
 end
 ```
 
-Window props: `title`, `width`, `height`, `resizable`, `x`/`y` (position),
-`background`, plus layout props and the callbacks `on_key(key)`,
+Window props: `title`, `width`, `height`, `resizable`, `background`, plus
+the positioning props — `position` (`:cascade` default: centered on the
+chosen display with a cascade offset per open window; `:centered`: exactly
+centered; `:manual`: exact `x`/`y`; `:mouse`: top-left at the pointer),
+`display` (display index for the centered modes; default: the display the
+pointer is on) and `x`/`y` (giving them without `position` implies
+`:manual`) — plus layout props and the callbacks `on_key(key)`,
 `on_text_input(text)` and `on_close()`. Returning `false` from `on_close`
 keeps the window open; without `on_close`, clicking the X hides the window
 (or quits if it is the last visible one). `quit!()` closes all windows and

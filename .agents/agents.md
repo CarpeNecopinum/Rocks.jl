@@ -70,6 +70,8 @@ timer — an idle application draws nothing.
   qualified alias.
 - Macro kwargs arrive wrapped in `Expr(:parameters, ...)` as the *first*
   positional argument of `@rock` — the macro splits them in element.jl.
+  Only `name = value` items are props; any other expression after the `;`
+  (e.g. `open && @rock(SecondWindow)`) is a positional child.
 - Text fibers hold raw content children (no child fibers); string children
   of non-Text hosts become Text elements during reconciliation.
 - Effect cleanup must run on unmount; timers/effects are tied to fibers and

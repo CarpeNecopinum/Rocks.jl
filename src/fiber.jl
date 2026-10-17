@@ -64,6 +64,28 @@ end
 
 # Create a fiber for an element and link it into the tree.
 function create_fiber(el::Element, parent)
+    if el.kind isa Element
+        # `@rock(SomeComponent())` — the component was called, so the kind is
+        # the Element it returned. Give a helpful hint.
+        inner_kind = el.kind.kind
+        hint = if inner_kind isa Function
+            "Did you mean `@rock($(nameof(inner_kind)))` instead of " *
+            "`@rock($(nameof(inner_kind))())`?"
+        elseif inner_kind isa HostKind
+            name = string(nameof(typeof(inner_kind)))
+            startswith(name, "_") && (name = name[2:end])
+            endswith(name, "Kind") && (name = name[1:end-4])
+            "The element already describes a `$name` — did you call a component " *
+            "inside `@rock`, e.g. `@rock(SecondWindow())` instead of " *
+            "`@rock(SecondWindow)`?"
+        else
+            ""
+        end
+        error(
+            "the kind of an element must be a host element kind or a component " *
+            "function, but got an already-created Element. $hint",
+        )
+    end
     props = Dict{Symbol,Any}(el.props)
     key = get(props, :key, nothing)
     delete!(props, :key) # the key prop is consumed by the reconciler
