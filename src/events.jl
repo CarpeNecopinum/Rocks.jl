@@ -43,6 +43,16 @@ function hit_test(fiber, x, y)
     return fiber
 end
 
+"Mark the OS window with the given SDL windowID as needing a redraw. This
+redraws the window without re-running components."
+function mark_window_draw!(window_id)
+    fiber = get(WINDOW_BY_ID, window_id, nothing)
+    if fiber !== nothing && fiber.host isa WindowState
+        fiber.host.needs_draw = true
+    end
+    return nothing
+end
+
 "Nearest `Pressable` ancestor of a fiber, not crossing window boundaries."
 function find_pressable(fiber)
     while fiber !== nothing
@@ -82,7 +92,9 @@ function set_hover!(window_id, pressable)
     end
     HOVERED_ACTIVE[] = !isempty(HOVERED)
     update_cursor()
-    request_render()
+    # Hover styling is drawn from the PressState flags — the window needs a
+    # redraw, not a re-render.
+    mark_window_draw!(window_id)
     return nothing
 end
 
@@ -100,12 +112,19 @@ function dispatch_event!(event::SDL_Event)
         wev = event.window.event
         if wev == SDL_WINDOWEVENT_CLOSE
             handle_close!(wid)
+        elseif wev == SDL_WINDOWEVENT_EXPOSED
+            # The window manager wants the window repainted (it was covered,
+            # restored, ...).
+            mark_window_draw!(wid)
         elseif wev == SDL_WINDOWEVENT_RESIZED || wev == SDL_WINDOWEVENT_SIZE_CHANGED
+            # Resized windows are re-laid out and redrawn without re-running
+            # components.
             fiber = get(WINDOW_BY_ID, wid, nothing)
             if fiber !== nothing && fiber.host isa WindowState
                 fiber.host.width = Int(event.window.data1)
                 fiber.host.height = Int(event.window.data2)
-                request_render()
+                fiber.host.needs_layout = true
+                fiber.host.needs_draw = true
             end
         end
     elseif ty == SDL_MOUSEBUTTONDOWN
@@ -119,7 +138,7 @@ function dispatch_event!(event::SDL_Event)
             ACTIVE_PRESS[(wid, event.button.button)] = pressable
             pressable.host isa PressState && (pressable.host.pressed = true)
             callback(pressable.props, :on_press_in)
-            request_render()
+            mark_window_draw!(wid)
         end
     elseif ty == SDL_MOUSEBUTTONUP
         wid = event.button.windowID
@@ -132,7 +151,7 @@ function dispatch_event!(event::SDL_Event)
            inside(pressable.rect, mx, my) && !Bool(get(pressable.props, :disabled, false))
             callback(pressable.props, :on_press)
         end
-        request_render()
+        mark_window_draw!(wid)
     elseif ty == SDL_MOUSEMOTION
         wid = event.motion.windowID
         fiber = get(WINDOW_BY_ID, wid, nothing)
@@ -195,6 +214,5 @@ function handle_close!(wid)
         SDL_HideWindow(fiber.host.ptr)
         fiber.hidden = true
     end
-    request_render()
     return nothing
 end

@@ -140,7 +140,9 @@ function reconcile_children!(fiber, elements_raw)
     for i in 1:n
         el = elements[i]
         prev = i <= length(old) ? old[i] : nothing
-        if prev !== nothing && compatible(prev, el)
+        # An unmounted fiber (e.g. a window closed by the user) must be
+        # replaced by a fresh one — it cannot be revived in place.
+        if prev !== nothing && prev.mounted && compatible(prev, el)
             update!(prev, el)
         else
             i <= length(old) && unmount!(old[i])

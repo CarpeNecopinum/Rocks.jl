@@ -159,9 +159,17 @@ hex strings (`"#f00"`, `"#00ff00"`, `"#rrggbbaa"`) or ColorTypes colors.
 
 State updates mark the application dirty; the main loop then re-renders the
 tree (component functions re-run, the reconciler updates persistent fibers
-in place), runs pending effects, lays out each window and draws it. Events
-are dispatched to the deepest fiber under the pointer, bubbling up to the
-nearest `Pressable` ancestor.
+in place), runs pending effects and lays out each window. Drawing is
+event-driven, not tied to a timer: windows are redrawn after a render pass,
+when the window manager exposes them (uncovered, restored), after they are
+resized, and on hover/press styling changes (redraw only, components do not
+re-run). Pointer styling changes redraw just the affected window; hover/press
+callbacks that update state go through the full dirty path. With no timers
+or events the main loop blocks, so an idle application neither redraws nor
+burns CPU.
+
+Pointer events are dispatched to the deepest fiber under the pointer,
+bubbling up to the nearest `Pressable` ancestor, like DOM event targets.
 
 ## Examples
 

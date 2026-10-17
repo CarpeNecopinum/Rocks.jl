@@ -40,6 +40,20 @@ function create_root(target::Element, kw::NamedTuple)
     return Fiber(target.kind, props, nothing)
 end
 
+# Milliseconds to block waiting for the next event: bounded by the time until
+# the next due timer (so timers stay accurate) and capped, so the loop keeps
+# progressing even if a platform never delivers events.
+function event_wait_timeout_ms()
+    timeout = 250
+    for timer in TIMERS
+        timer.active || continue
+        delta = Int(timer.due) - Int(time_ns())
+        delta <= 0 && return 0
+        timeout = min(timeout, Int(ceil(delta / 1e6)))
+    end
+    return timeout
+end
+
 """
     render(app; kwargs...)
 
@@ -67,11 +81,12 @@ called). `app` is either
   render(@rock(Window, @rock(Text, "Hello")))
   ```
 
-The render loop: poll and dispatch SDL events → fire due timers → if dirty,
-re-render the tree (component functions re-run, fibers are reconciled), run
-pending effects and lay out — then draw every window every frame. Drawing is
-decoupled from rendering, so window damage (occlusion, off-screen movement)
-is redrawn immediately without waiting for a state update.
+The render loop: block until an event arrives or a timer is due → dispatch
+events, fire due timers → if dirty, re-render the tree (component functions
+re-run, fibers are reconciled), run pending effects and lay out → redraw the
+windows that need it: after a render pass, when the window manager exposed
+them (covered, restored), after a resize, or on hover/press styling changes.
+An idle application neither redraws nor burns CPU.
 
 Note: like `ReactDOM.render`. `Rocks.run` is available as a qualified alias
 if you prefer React's naming (`using Rocks` makes plain `run` ambiguous with
@@ -90,7 +105,9 @@ function render(app; kwargs...)
         event = Ref{SDL_Event}()
         windows = Fiber[]
         while RUNNING[]
-            if SDL_WaitEventTimeout(event, 16) == 1
+            # Block until the next event or until the next timer is due, so
+            # an idle application neither redraws nor burns CPU.
+            if SDL_WaitEventTimeout(event, event_wait_timeout_ms()) == 1
                 dispatch_event!(event[])
                 while SDL_PollEvent(event) == 1
                     dispatch_event!(event[])
@@ -113,11 +130,28 @@ function render(app; kwargs...)
                     measure!(w)
                     place!(w, 0.0, 0.0)
                 end
+                for w in windows
+                    w.host isa WindowState && (w.host.needs_draw = true)
+                end
             end
-            # Drawing is decoupled from rendering: every frame is presented,
-            # so damage from window occlusion or off-screen movement is
-            # redrawn immediately, not just on the next state update.
+            # Resized windows are re-laid out without re-running components.
             for w in windows
+                state = w.host
+                state isa WindowState || continue
+                state.needs_layout || continue
+                state.needs_layout = false
+                measure!(w)
+                place!(w, 0.0, 0.0)
+            end
+            # Drawing is event-driven: redraw only the windows that need it —
+            # after a render pass, when the window manager exposed them
+            # (uncovered, restored), after a resize, or on hover/press styling
+            # changes.
+            for w in windows
+                state = w.host
+                state isa WindowState || continue
+                state.needs_draw || continue
+                state.needs_draw = false
                 w.hidden || draw_window!(w)
             end
         end

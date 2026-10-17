@@ -76,6 +76,26 @@ function push_mouse!(fiber, type, x, y; button = 1)
     return nothing
 end
 
+function push_window_event!(fiber, wev; data1 = 0, data2 = 0)
+    ev = Ref{Rocks.SDL_Event}()
+    p = Base.unsafe_convert(Ptr{Rocks.SDL_Event}, ev)
+    Rocks.setproperty!(p, :type, UInt32(Rocks.SDL_WINDOWEVENT))
+    window_event = Rocks.SDL_WindowEvent(
+        UInt32(Rocks.SDL_WINDOWEVENT),
+        UInt32(0),
+        UInt32(fiber.host.id),
+        UInt8(wev),
+        UInt8(0),
+        UInt8(0),
+        UInt8(0),
+        Int32(data1),
+        Int32(data2),
+    )
+    unsafe_store!(Rocks.getproperty(p, :window), window_event)
+    @assert SDL_PushEvent(p) >= 0
+    return nothing
+end
+
 center_of(fiber) = (
     round(Int, fiber.rect[1] + fiber.rect[3] / 2),
     round(Int, fiber.rect[2] + fiber.rect[4] / 2),
@@ -384,6 +404,54 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             windows = sync_windows!(root)
             @test length(windows) == 1
             @test length(Rocks.WINDOW_BY_ID) == 1
+        end
+    end
+
+    @testset "draw scheduling" begin
+        function App()
+            @rock(Window,
+                @rock(Pressable, @rock(Text, "btn"); padding = 10);
+                title = "sched", width = 200, height = 100, resizable = true)
+        end
+        with_tree(App) do root
+            w = sync_windows!(root)[1]
+            state = w.host
+            state.needs_draw = false
+
+            # exposure marks the window for redraw
+            push_window_event!(w, Rocks.SDL_WINDOWEVENT_EXPOSED)
+            drain_events!()
+            @test state.needs_draw == true
+            state.needs_draw = false
+
+            # resize updates the size and marks for re-layout + redraw
+            push_window_event!(w, Rocks.SDL_WINDOWEVENT_RESIZED; data1 = 320, data2 = 240)
+            drain_events!()
+            @test state.width == 320 && state.height == 240
+            @test state.needs_layout == true && state.needs_draw == true
+
+            # hover motion over the pressable marks for redraw
+            state.needs_draw = false
+            state.needs_layout = false
+            cx, cy = center_of(w.children[1])
+            push_mouse!(w, Rocks.SDL_MOUSEMOTION, cx, cy)
+            drain_events!()
+            @test state.needs_draw == true
+            @test state.needs_layout == false # no re-layout on hover
+            @test w.children[1].host.hovered == true
+
+            # motion over empty space with unchanged hover state: no redraw
+            state.needs_draw = false
+            push_mouse!(w, Rocks.SDL_MOUSEMOTION, cx, cy)
+            drain_events!()
+            @test state.needs_draw == false
+
+            # event_wait_timeout_ms is bounded by the next due timer
+            @test Rocks.event_wait_timeout_ms() == 250 # no timers
+            Rocks.add_timer(() -> nothing, 50; repeating = true)
+            @test 0 <= Rocks.event_wait_timeout_ms() <= 50
+            empty!(Rocks.TIMERS)
+            @test Rocks.event_wait_timeout_ms() == 250
         end
     end
 

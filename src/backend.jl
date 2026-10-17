@@ -119,6 +119,12 @@ mutable struct WindowState
     id::UInt32
     width::Int
     height::Int
+    # Drawing is event-driven: a window is redrawn after a render pass, when
+    # the window manager exposes it, after a resize, or on hover/press
+    # styling changes. `needs_layout` re-lays out the window without
+    # re-running components (used after resizes).
+    needs_draw::Bool
+    needs_layout::Bool
 end
 
 mutable struct TextState
@@ -202,7 +208,7 @@ function create_window!(fiber)
     end
     renderer == C_NULL && error("SDL_CreateRenderer failed: $(unsafe_string(SDL_GetError()))")
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND)
-    state = WindowState(ptr, renderer, SDL_GetWindowID(ptr), width, height)
+    state = WindowState(ptr, renderer, SDL_GetWindowID(ptr), width, height, true, false)
     fiber.host = state
     WINDOW_BY_ID[state.id] = fiber
     return state
