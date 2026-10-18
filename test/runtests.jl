@@ -848,6 +848,71 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         rm(path; force = true)
     end
 
+    @testset "context" begin
+        Theme = createContext((dark = false,))
+        theme_obs = Observable((dark = true,))
+
+        function Consumer()
+            theme = @use Theme
+            dark = theme isa Observable ? theme[].dark : theme.dark
+            @rock Box(@rock Text("dark: ", string(dark)))
+        end
+
+        # no provider -> the context default
+        with_tree(Consumer) do root
+            @test Rocks.text_content(root.children[1].children[1]) == "dark: false"
+        end
+
+        # provider with an Observable value; setting it re-renders the consumer
+        function ProviderApp()
+            @rock Theme.provider(
+                @rock Consumer();
+                value = theme_obs)
+        end
+        with_tree(ProviderApp) do root
+            consumer = root.children[1].children[1] # Provider -> Consumer
+            @test Rocks.text_content(consumer.children[1].children[1]) == "dark: true"
+            @test length(theme_obs.listeners) == 1 # subscribed via @use
+            Rocks.DIRTY[] = false
+            theme_obs[] = (dark = false,)
+            @test Rocks.DIRTY[] == true
+            Rocks.perform_render!(root)
+            @test Rocks.text_content(consumer.children[1].children[1]) == "dark: false"
+        end
+        Rocks.DIRTY[] = false
+        theme_obs[] = (dark = true,)
+        @test Rocks.DIRTY[] == false # unsubscribed after unmount
+
+        # nested providers: the nearest one wins; plain values work too
+        function NestedApp()
+            @rock Theme.provider(
+                @rock Theme.provider(
+                    @rock Consumer();
+                    value = (dark = false,));
+                value = (dark = true,))
+        end
+        with_tree(NestedApp) do root
+            inner = root.children[1].children[1] # the inner Provider
+            consumer = inner.children[1]
+            @test Rocks.text_content(consumer.children[1].children[1]) == "dark: false"
+        end
+
+        # the provider renders its children unchanged
+        function PassthroughApp()
+            @rock Theme.provider(
+                @rock Text("hello");
+                value = (dark = true,))
+        end
+        with_tree(PassthroughApp) do root
+            provider = root.children[1]
+            @test Rocks.text_content(provider.children[1]) == "hello"
+        end
+
+        # createContext needs its context object for @use lookups
+        @test Theme.provider isa Function
+        @test Theme.default == (dark = false,)
+    end
+
     @testset "on_key" begin
         last_key = Ref("")
         function App()

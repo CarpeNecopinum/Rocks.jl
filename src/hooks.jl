@@ -35,9 +35,26 @@ end
 deps_equal(a, b) = a == b
 
 mutable struct UseHook
-    value::Any        # the Ref or Observable the expression created
-    subscription::Any # Observables.ObserverFunction for Observables, else nothing
-    last::Any         # last seen observable value, for change deduplication
+    value::Any         # what the expression evaluated to (Ref/Observable/Context)
+    subscription::Any  # current ObserverFunction, or nothing
+    subscribed_to::Any # the Observable the subscription is on
+    last::Any          # last seen observable value, for change deduplication
+    is_context::Bool   # context hooks re-look-up their value on every render
+end
+
+# Subscribe a @use hook to an Observable; re-subscribes when the target
+# changes (contexts can switch providers between renders).
+function subscribe_observable!(hook, value)
+    hook.subscribed_to === value && return
+    hook.subscription !== nothing && off(hook.subscription)
+    hook.subscribed_to = value
+    hook.last = value[]
+    hook.subscription = on(value) do new
+        new === hook.last && return # identical values do not re-render
+        hook.last = new
+        request_render()
+    end
+    return nothing
 end
 
 """
@@ -73,6 +90,8 @@ derived without extra libraries:
   parent component.
 * `@use map(x -> x.sub, obs)` — derive a sub-state; the component only
   re-renders when the mapped value actually changes.
+* `@use SomeContext` — the context receiver: the value provided by the
+  nearest [`createContext`](@ref) provider above the component.
 
 Like all hooks, `@use` must be called unconditionally at the top level of a
 component (React rules apply). The expression is evaluated exactly once, on
@@ -82,17 +101,21 @@ macro use(expr)
     return quote
         hook, _ = use_hook(() -> begin
             value = $(esc(expr))
-            h = UseHook(value, nothing, value isa Observable ? value[] : nothing)
-            if value isa Observable
-                h.subscription = on(value) do new
-                    new === h.last && return # identical values do not re-render
-                    h.last = new
-                    request_render()
-                end
-            end
+            is_context = value isa Context
+            h = UseHook(value, nothing, nothing, nothing, is_context)
+            !is_context && value isa Observable && subscribe_observable!(h, value)
             h
         end)
-        hook.value
+        if hook.is_context
+            # context: re-look-up the nearest provider value on every render
+            fiber = CURRENT_FIBER[]
+            value = fiber === nothing ? hook.value.default :
+                    lookup_context(fiber, hook.value)
+            value isa Observable && subscribe_observable!(hook, value)
+            value
+        else
+            hook.value
+        end
     end
 end
 
@@ -194,6 +217,78 @@ Convenience for `useMemo(() -> f, deps)`: returns `f` itself, but only
 re-created when `deps` change.
 """
 useCallback(f::Function, deps) = useMemo(() -> f, deps)
+
+# ---- context -------------------------------------------------------------
+
+"""
+    createContext(default = nothing) -> context
+
+Create a context: a `Provider` component and a value that components read
+with `@use`. The nearest `provider` above a component in the fiber tree wins;
+without any provider, `default` is used.
+
+```julia
+const Theme = createContext((dark = false,))
+
+function App()
+    theme = @use Observable((dark = true,))
+    @rock Theme.provider(          # provide the value down the tree
+        @rock Toolbar();
+        value = theme)
+end
+
+function Toolbar()
+    theme = @use Theme             # the receiver: nearest provided value
+    @rock Text("dark mode: ", theme[].dark)
+end
+```
+
+Provide an `Observable` as the `value` so consumers re-render when it
+changes (setting it to an identical value does not re-render). The value may
+also be a plain value; consumers then update whenever their subtree
+re-renders. The provider renders its children unchanged.
+"""
+mutable struct Context
+    default::Any
+    provider::Any
+end
+
+function createContext(default = nothing)
+    ctx = Context(default, nothing)
+    provider = function (; value = default, children = Any[], kwargs...)
+        use_provider_slot(ctx, value)
+        return flat_children(children) # renders its children unchanged
+    end
+    ctx.provider = provider
+    return ctx
+end
+
+mutable struct ProviderSlot
+    ctx::Any
+    value::Any
+end
+
+# Register the provided value on the current fiber (the Provider's fiber) so
+# that `@use` lookups find it.
+function use_provider_slot(ctx, value)
+    hook, _ = use_hook(() -> ProviderSlot(ctx, value))
+    hook.ctx = ctx
+    hook.value = value
+    return nothing
+end
+
+# Walk up the fiber tree to the nearest provider of `ctx` and return its
+# value; falls back to the context default.
+function lookup_context(fiber, ctx)
+    f = fiber
+    while f !== nothing
+        for hook in f.hooks
+            hook isa ProviderSlot && hook.ctx === ctx && return hook.value
+        end
+        f = f.parent
+    end
+    return ctx.default
+end
 
 # ---- timers -------------------------------------------------------------
 

@@ -47,6 +47,9 @@ end
   `request_render()` for a manual redraw. Replaces React-style `useRef`.
 - `x = @use someGlobalObservable` / `@use observablePassedInAsProp` —
   subscribe to shared state; unsubscribed automatically on unmount.
+- `x = @use SomeContext` — the context receiver: the value provided by the
+  nearest `createContext(...).provider` above the component (re-looked-up
+  every render; subscribing when the value is an Observable).
 - `x = @use map(s -> s.sub, obs)` — derived sub-state; the component only
   re-renders when the mapped value actually changes.
 - `useEffect(f, deps = nothing)` — `nothing` = every render, `()` = once on

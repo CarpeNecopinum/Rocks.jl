@@ -14,20 +14,6 @@ const ACCENTS = Dict{Symbol,Tuple{Float64,Float64,Float64}}(
 _shade(c::Tuple{Float64,Float64,Float64}, f::Real) =
     (clamp(c[1] * f, 0.0, 1.0), clamp(c[2] * f, 0.0, 1.0), clamp(c[3] * f, 0.0, 1.0))
 
-# Flatten tuple/vector children (spaced @rock macrocalls swallow commas, so
-# arrays of elements arrive as nested tuples).
-function flat_children(children)
-    out = Any[]
-    for c in children
-        if c isa Union{Tuple,Vector}
-            append!(out, flat_children(c))
-        else
-            push!(out, c)
-        end
-    end
-    return out
-end
-
 """
     Button(; label = "", variant = :contained, color = :primary,
            size = :medium, on_press = () -> nothing, disabled = false,

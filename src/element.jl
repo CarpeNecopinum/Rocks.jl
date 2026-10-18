@@ -320,3 +320,17 @@ end
 function to_elements(out)
     return push_children!(Any[], out)
 end
+
+# Flatten tuple/vector children (spaced @rock macrocalls swallow commas, so
+# arrays of elements arrive as nested tuples).
+function flat_children(children)
+    out = Any[]
+    for c in children
+        if c isa Union{Tuple,Vector}
+            append!(out, flat_children(c))
+        else
+            push!(out, c)
+        end
+    end
+    return out
+end

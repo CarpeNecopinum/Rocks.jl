@@ -99,7 +99,7 @@ conditional hooks), exactly like React.
 
 | Hook | Purpose |
 | --- | --- |
-| `@use expr` | State. `expr` creates a `Ref` or an `Observable` on the first render and is returned on every render. Setting an `Observable` re-renders; `Ref`s are silent. |
+| `@use expr` | State. `expr` creates a `Ref` or an `Observable` on the first render and is returned on every render. Setting an `Observable` re-renders; `Ref`s are silent. `@use SomeContext` is the context receiver. |
 | `useEffect(f, deps = nothing)` | Side effects after render. `nothing` = every render, `()` = once on mount, `(x,)` = when `x` changes. Return a cleanup function from `f`. |
 | `useMemo(f, deps)` / `useCallback(f, deps)` | Memoization. |
 | `useInterval(f, ms)` / `useTimeout(f, ms)` | Timers, cleaned up automatically on unmount. |
@@ -126,6 +126,32 @@ observable, `@use observablePassedInAsProp` to one owned by a parent, and
 a re-render (setting an observable to an identical value never re-renders).
 `@use Ref(0)` replaces React-style `useRef` — mutate `ref[]` silently and
 call `request_render()` when a redraw is needed.
+
+### Context
+
+`createContext(default)` creates a context with a `provider` component and a
+value that components read with `@use` — the nearest provider above a
+component in the fiber tree wins, the `default` otherwise:
+
+```julia
+const Theme = createContext((dark = false,))
+
+function Toolbar()
+    theme = @use Theme                       # the receiver
+    @rock Text("dark mode: ", theme[].dark)
+end
+
+function App()
+    theme = @use Observable((dark = true,))
+    @rock Theme.provider(                    # the provider
+        @rock Toolbar();
+        value = theme)
+end
+```
+
+Provide an `Observable` as the `value` so consumers re-render when it changes
+(identical values never re-render). Plain values work too — consumers then
+update whenever their subtree re-renders.
 
 ### Windows are components
 
