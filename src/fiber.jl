@@ -47,7 +47,15 @@ function Fiber(kind, props, parent)
     )
 end
 
-initial_host(kind) = kind === _PRESSABLE ? PressState(false, false) : nothing
+initial_host(kind) = if kind === _PRESSABLE
+    PressState(false, false)
+elseif kind === _SPLIT
+    SplitState(0.5, false, (0.0, 0.0, 0.0, 0.0), 0.5, 0.0)
+elseif kind === _SLIDER
+    SliderState((0.0, 0.0, 0.0, 0.0))
+else
+    nothing
+end
 
 is_window(f::Fiber) = f.kind === _WINDOW
 is_text(f::Fiber) = f.kind === _TEXT

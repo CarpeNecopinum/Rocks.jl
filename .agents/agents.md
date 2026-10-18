@@ -28,7 +28,8 @@ src/
 ├── backend.jl     # SDL2 backend: windows, textures, fonts, colors, drawing
 ├── events.jl      # SDL event routing, hit testing, press/hover tracking
 ├── runtime.jl     # main loop, render entry point, quit!
-└── components.jl  # Row/Column convenience components
+├── components.jl  # Row/Column convenience components
+└── widgets.jl     # pre-styled components (Button, Checkbox, Toggle, ...)
 ```
 
 Render cycle: SDL events / Observable sets → mark the app dirty → re-render

@@ -7,6 +7,13 @@ using SimpleDirectMediaLayer.LibSDL2:
     SDL_GetWindowTitle,
     SDL_GetWindowPosition,
     SDL_GetMouseState,
+    SDL_SaveBMP_RW,
+    SDL_RWFromFile,
+    SDL_CreateRGBSurfaceWithFormat,
+    SDL_FillRect,
+    SDL_MapRGB,
+    SDL_FreeSurface,
+    SDL_PIXELFORMAT_RGB24,
     SDL_SCANCODE_ESCAPE,
     SDLK_ESCAPE
 import Rocks: Text, Element, Window, Box, Pressable, Row, Column
@@ -634,6 +641,211 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             Rocks.RUNNING[] = false
             Rocks.shutdown_backend()
         end
+    end
+
+    @testset "widgets" begin
+        # Button variants (components are plain functions — call them directly)
+        b = Button(; label = "Save", variant = :contained, color = :primary)
+        @test b.kind === Pressable
+        @test b.props[:background] == Rocks.ACCENTS[:primary]
+        outlined = Button(; label = "Cancel", variant = :outlined, color = :error)
+        @test outlined.props[:background] === nothing
+        @test outlined.props[:border_color] == Rocks.ACCENTS[:error]
+        @test outlined.props[:border_width] == 1
+        textbtn = Button(; label = "Text", variant = :text)
+        @test textbtn.props[:border_color] === nothing
+        disabled = Button(; label = "Off", disabled = true)
+        @test disabled.props[:disabled] == true
+
+        # Checkbox flips its observable and fires on_change
+        checked = Observable(false)
+        changed = Ref(0)
+        cb = Checkbox(; label = "grid", value = checked, on_change = () -> (changed[] += 1))
+        with_tree(cb) do root
+            @test root.kind === Pressable
+            root.props[:on_press]()
+            @test checked[] == true
+            @test changed[] == 1
+            root.props[:on_press]()
+            @test checked[] == false
+        end
+
+        # Toggle
+        on = Observable(false)
+        tg = Toggle(; value = on)
+        with_tree(tg) do root
+            root.props[:on_press]()
+            @test on[] == true
+            root.props[:on_press]()
+            @test on[] == false
+        end
+
+        # RadioGroup selects an index
+        sel = Observable(2)
+        changed = Ref(0)
+        rg = RadioGroup(; options = ["Small", "Medium", "Large"], selected = sel,
+                        on_change = () -> (changed[] += 1))
+        with_tree(rg) do root
+            @test length(root.children) == 3
+            root.children[1].props[:on_press]()
+            @test sel[] == 1
+            @test changed[] == 1
+        end
+
+        # DropDownMenu opens, selects and closes (uses @use internally, so it
+        # needs a component context)
+        sel = Observable(1)
+        changed = Ref(0)
+        function MenuApp()
+            DropDownMenu(; options = ["Sans", "Serif"], selected = sel,
+                         on_change = () -> (changed[] += 1))
+        end
+        with_tree(MenuApp) do root
+            menu = root.children[1] # the DropDownMenu's outer Box
+            @test length(menu.children) == 1 # menu closed: only the toggle
+            menu.children[1].props[:on_press]() # open the menu
+            Rocks.perform_render!(root)
+            @test length(menu.children) == 2 # toggle + expanded list
+            list = menu.children[2]
+            @test length(list.children) == 2
+            list.children[2].props[:on_press]() # pick "Serif"
+            @test sel[] == 2
+            @test changed[] == 1
+        end
+
+        # Tabber switches content by index (the component must re-run, so it
+        # is wrapped in a component function)
+        tab = Observable(1)
+        function TabApp()
+            Tabber(; tabs = ["A", "B"], selected = tab,
+                   children = [@rock Text("one"), @rock Text("two")])
+        end
+        with_tree(TabApp) do root
+            box = root.children[1] # the Tabber's outer Box
+            @test length(box.children) == 2 # tab bar + content
+            @test Rocks.text_content(box.children[2]) == "one"
+            tab[] = 2
+            Rocks.perform_render!(root)
+            @test Rocks.text_content(box.children[2]) == "two"
+        end
+
+        # ProgressBar tracks its observable
+        progress = Observable(0.0)
+        function ProgressApp()
+            ProgressBar(; value = progress, width = 100, height = 10)
+        end
+        with_tree(ProgressApp) do root
+            bar = root.children[1] # the track
+            @test bar.kind === Box
+            @test bar.props[:background] == (0.25, 0.25, 0.29)
+            @test bar.children[1].props[:width] == 0 # the fill
+            progress[] = 0.5
+            Rocks.perform_render!(root)
+            @test bar.children[1].props[:width] == 50
+        end
+
+        # widgets need Observable props
+        @test_throws "Checkbox needs an `Observable`" Checkbox(; value = false)
+        @test_throws "Toggle needs an `Observable`" Toggle(; value = true)
+        @test_throws "ProgressBar needs an `Observable`" ProgressBar(; value = 0.5)
+    end
+
+    @testset "split and slider" begin
+        ratio = Observable(0.5)
+        value = Observable(0.5)
+        function App()
+            @rock Window(
+                @rock Split(
+                    @rock Box(; background = (0.3, 0.3, 0.35), children = [@rock Text("left")]),
+                    @rock Box(; background = (0.2, 0.2, 0.25), children = [@rock Text("right")]);
+                    direction = :horizontal, ratio = ratio,
+                    width = 400, height = 300),
+                @rock Slider(; value = value, width = 200);
+                title = "split", width = 500, height = 400,
+                padding = 10, gap = 10)
+        end
+        with_tree(App) do root
+            windows = sync_windows!(root)
+            @test length(windows) == 1
+            w = windows[1]
+            split = w.children[1]
+            @test split.kind === Split
+            st = split.host
+            @test st isa Rocks.SplitState
+
+            # panes fill their sides: split width 400, handle 6 -> 197 each
+            pane1, pane2 = split.children
+            @test pane1.rect[1] == 10 && pane1.rect[3] == 197
+            @test pane2.rect[1] == 10 + 197 + 6
+            @test pane2.rect[3] == 197
+
+            # dragging the handle resizes the panes (ratio observable updated)
+            hx, hy = round(Int, st.handle_rect[1] + st.handle_rect[3] / 2),
+                     round(Int, st.handle_rect[2] + st.handle_rect[4] / 2)
+            push_mouse!(split, Rocks.SDL_MOUSEBUTTONDOWN, hx, hy)
+            drain_events!()
+            @test Rocks.ACTIVE_DRAG[] === split
+            push_mouse!(split, Rocks.SDL_MOUSEMOTION, hx + 95, hy) # +95px => ratio ~0.75
+            drain_events!()
+            @test Rocks.ACTIVE_DRAG[] === split
+            push_mouse!(split, Rocks.SDL_MOUSEBUTTONUP, hx + 95, hy)
+            drain_events!()
+            @test Rocks.ACTIVE_DRAG[] === nothing
+            @test ratio[] > 0.6
+            sync_windows!(root) # re-layout after the drag
+            @test split.children[1].rect[3] > 197 # the left pane grew
+
+            # the slider: clicking sets its value from the x position
+            slider = w.children[2]
+            @test slider.kind === Slider
+            sx, sy = round(Int, slider.rect[1] + slider.rect[3] / 2),
+                     round(Int, slider.rect[2] + slider.rect[4] / 2)
+            push_mouse!(slider, Rocks.SDL_MOUSEBUTTONDOWN, sx, sy)
+            drain_events!()
+            push_mouse!(slider, Rocks.SDL_MOUSEBUTTONUP, sx, sy)
+            drain_events!()
+            @test 0.45 <= value[] <= 0.55
+        end
+    end
+
+    @testset "image" begin
+        # load a generated BMP through the Image element
+        path = joinpath(tempdir(), "rocks-test-image.bmp")
+        Rocks.init_backend()
+        surface = SDL_CreateRGBSurfaceWithFormat(0, 16, 8, 24, SDL_PIXELFORMAT_RGB24)
+        SDL_FillRect(surface, C_NULL, SDL_MapRGB(unsafe_load(surface).format, 200, 100, 50))
+        rw = SDL_RWFromFile(path, "wb")
+        @assert SDL_SaveBMP_RW(surface, rw, 1) == 0 # frees the RWops
+        SDL_FreeSurface(surface)
+
+        el = @rock Image(; src = path)
+        f = Rocks.create_fiber(el, nothing)
+        Rocks.perform_render!(f)
+        # the image loads at measure/draw time and reports its natural size
+        @test Rocks.measure_image(f) == (16.0, 8.0)
+        # scaled: width 32 -> height scales by aspect (32 * 8/16 = 16)
+        el2 = @rock Image(; src = path, width = 32)
+        f2 = Rocks.create_fiber(el2, nothing)
+        Rocks.perform_render!(f2)
+        @test Rocks.measure_image(f2) == (32.0, 16.0)
+
+        # drawing creates the texture through the window's renderer
+        win = @rock Window(@rock Image(; src = path); width = 100, height = 100)
+        wroot = Rocks.create_root(win, NamedTuple())
+        Rocks.perform_render!(wroot)
+        windows = sync_windows!(wroot)
+        Rocks.draw_window!(windows[1]) # the texture is created at draw time
+        img = windows[1].children[1]
+        @test img.kind === Image
+        @test img.host isa Rocks.ImageState
+        @test img.host.texture != C_NULL
+
+        for w in windows
+            Rocks.destroy_window!(w)
+        end
+        Rocks.unmount!(wroot)
+        delete!(Rocks.IMAGE_SURFACES, path)
+        rm(path; force = true)
     end
 
     @testset "on_key" begin

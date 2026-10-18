@@ -38,6 +38,21 @@ function measure!(fiber)
         end
     elseif is_text(fiber)
         w, h = measure_text(fiber)
+    elseif fiber.kind === _IMAGE
+        w, h = measure_image(fiber)
+    elseif fiber.kind === _SPLIT
+        w = float(get(fiber.props, :width, 400))
+        h = float(get(fiber.props, :height, 300))
+        seed_split_ratio!(fiber)
+        for child in flow_children(fiber)
+            measure!(child)
+        end
+    elseif fiber.kind === _SLIDER
+        value = get(fiber.props, :value, nothing)
+        value isa Observable ||
+            error("Slider needs an `Observable` as its `value` prop")
+        w = float(get(fiber.props, :width, 200))
+        h = float(get(fiber.props, :height, 24))
     elseif is_host(fiber.kind)
         w, h = measure_box(fiber)
     else
@@ -114,6 +129,14 @@ function place!(fiber, x, y)
     if is_text(fiber)
         return # text draws at its rect origin
     end
+    if fiber.kind === _SPLIT
+        place_split!(fiber, x, y)
+        return
+    end
+    if fiber.kind === _SLIDER
+        place_slider!(fiber, x, y)
+        return
+    end
     if is_host(fiber.kind)
         dir = Symbol(get(fiber.props, :direction, :column))
         gap = float(get(fiber.props, :gap, 0))
@@ -129,6 +152,93 @@ function place!(fiber, x, y)
         end
     end
     return
+end
+
+# Lay out the two panes of a Split and record the handle rect for hit
+# testing. Panes fill their side of the split exactly.
+function place_split!(fiber, x, y)
+    W, H = fiber.measured
+    t = float(get(fiber.props, :handle, 6))
+    dir = Symbol(get(fiber.props, :direction, :horizontal))
+    ratio = split_ratio(fiber)
+    if dir === :vertical
+        pane1_h = (H - t) * ratio
+        pane1 = (x, y, W, pane1_h)
+        handle = (x, y + pane1_h, W, t)
+        pane2 = (x, y + pane1_h + t, W, max(H - t - pane1_h, 0.0))
+    else
+        pane1_w = (W - t) * ratio
+        pane1 = (x, y, pane1_w, H)
+        handle = (x + pane1_w, y, t, H)
+        pane2 = (x + pane1_w + t, y, max(W - t - pane1_w, 0.0), H)
+    end
+    panes = collect(flow_children(fiber))
+    if length(panes) >= 1
+        panes[1].measured = (pane1[3], pane1[4])
+        place!(panes[1], pane1[1], pane1[2])
+    end
+    if length(panes) >= 2
+        panes[2].measured = (pane2[3], pane2[4])
+        place!(panes[2], pane2[1], pane2[2])
+    end
+    fiber.host isa SplitState && (fiber.host.handle_rect = handle)
+    return nothing
+end
+
+function place_slider!(fiber, x, y)
+    fiber.host isa SliderState &&
+        (fiber.host.handle_rect = (x, y, fiber.measured[1], fiber.measured[2]))
+    return nothing
+end
+
+# The current split position: an `Observable` `ratio` prop is controlled
+# (read and written by dragging), a number seeds the internal position.
+function split_ratio(fiber)
+    r = get(fiber.props, :ratio, nothing)
+    r isa Observable && return clamp(r[], 0.05, 0.95)
+    fiber.host isa SplitState && return clamp(fiber.host.ratio, 0.05, 0.95)
+    return 0.5
+end
+
+function set_split_ratio!(fiber, r)
+    r = clamp(r, 0.05, 0.95)
+    prop = get(fiber.props, :ratio, nothing)
+    if prop isa Observable
+        prop[] = r
+    elseif fiber.host isa SplitState
+        fiber.host.ratio = r
+    end
+    return nothing
+end
+
+# Seed the internal split position from a numeric `ratio` prop, once.
+function seed_split_ratio!(fiber)
+    fiber.host isa SplitState || return
+    fiber.host.seeded && return
+    r = get(fiber.props, :ratio, nothing)
+    r isa Real && !isa(r, Observable) && (fiber.host.ratio = clamp(Float64(r), 0.05, 0.95))
+    fiber.host.seeded = true
+    return nothing
+end
+
+# Natural image size scaled to the `width`/`height` props. The image loads
+# (and is cached) at measure time, so the size is known before the first draw.
+function measure_image(fiber)
+    src = string(get(fiber.props, :src, ""))
+    surface = image_surface(src)
+    surface == C_NULL && return (0.0, 0.0)
+    dims = unsafe_load(surface)
+    nw, nh = Float64(dims.w), Float64(dims.h)
+    w = get(fiber.props, :width, nothing)
+    h = get(fiber.props, :height, nothing)
+    if w !== nothing && h !== nothing
+        return (float(w), float(h))
+    elseif w !== nothing && nw > 0
+        return (float(w), nh * float(w) / nw)
+    elseif h !== nothing && nh > 0
+        return (nw * float(h) / nh, float(h))
+    end
+    return (nw, nh)
 end
 
 function place_flow!(fiber, dir, gap, p, align, x, y, w, h)

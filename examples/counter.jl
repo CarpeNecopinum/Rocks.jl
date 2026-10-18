@@ -37,4 +37,6 @@ function App()
         padding = 24, gap = 20)
 end
 
-render(App)
+if abspath(PROGRAM_FILE) == @__FILE__
+    render(App)
+end

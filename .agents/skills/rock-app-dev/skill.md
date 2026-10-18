@@ -80,6 +80,19 @@ opens a dialog. `quit!()` closes all windows.
 - `Pressable` — `on_press`, `on_press_in`, `on_press_out`, `on_hover_in`,
   `on_hover_out`, `disabled`; `background`, `hover_background`,
   `pressed_background`.
+- `Image` — `src` (path or URL), `width`/`height` scaling.
+- `Split` — resizable divider: first two children are panes; `direction`,
+  `ratio` (Observable = controlled), `handle`, `width`, `height`.
+- `Slider` — `value` (Observable, required), `min`, `max`, `width`,
+  `on_change(value)`.
+
+Pre-styled components (widgets.jl): `Button` (variants contained/outlined/
+text, colors primary/secondary/success/error/warning/info, sizes),
+`Checkbox`, `Toggle` (Observable{Bool} values), `RadioGroup` and
+`DropDownMenu` (Observable{Int} selected index over `options::Vector{String}`),
+`Tabber` (tabs + one children element per tab), `ProgressBar`
+(Observable 0..1). Widgets that index their children flatten them with
+`flat_children` first (spaced @rock macrocalls swallow commas into tuples).
 
 Styling is manual (React-Native style): sizes are pixels, colors are tuples
 (0-1 floats or 0-255 ints), hex strings or ColorTypes.

@@ -53,6 +53,96 @@ function mark_window_draw!(window_id)
     return nothing
 end
 
+"Mark the OS window containing `fiber` as needing a re-layout and redraw,
+without re-running components. Used while dragging Splits and Sliders."
+function mark_window_layout!(fiber)
+    f = fiber
+    while f !== nothing && !is_window(f)
+        f = f.parent
+    end
+    if f !== nothing && f.host isa WindowState
+        f.host.needs_layout = true
+        f.host.needs_draw = true
+    end
+    return nothing
+end
+
+# ---- dragging Splits and Sliders ----------------------------------------
+
+"Drag state: the fiber currently being dragged, if any."
+const ACTIVE_DRAG = Ref{Union{Nothing,Fiber}}(nothing)
+
+"Nearest draggable ancestor (`Split` handle or `Slider`) of a hit target, not
+crossing window boundaries."
+function find_draggable(target, x, y)
+    f = target
+    while f !== nothing
+        if (f.kind === _SPLIT || f.kind === _SLIDER) && f.host !== nothing &&
+           inside(f.host.handle_rect, x, y)
+            return f
+        end
+        is_window(f) && return nothing
+        f = f.parent
+    end
+    return nothing
+end
+
+function drag_start!(fiber, x, y)
+    if fiber.kind === _SPLIT
+        fiber.host isa SplitState || return
+        fiber.host.drag_start_ratio = split_ratio(fiber)
+        dir = Symbol(get(fiber.props, :direction, :horizontal))
+        fiber.host.drag_start_pos = dir === :vertical ? y : x
+    elseif fiber.kind === _SLIDER
+        slider_drag_update!(fiber, x, y) # clicking jumps to the position
+    end
+    return nothing
+end
+
+function drag_update!(fiber, x, y)
+    if fiber.kind === _SPLIT
+        st = fiber.host
+        st isa SplitState || return
+        dir = Symbol(get(fiber.props, :direction, :horizontal))
+        rx, ry, rw, rh = fiber.rect
+        t = float(get(fiber.props, :handle, 6))
+        main = dir === :vertical ? rh - t : rw - t
+        main <= 0 && return
+        pos = dir === :vertical ? y : x
+        delta = (pos - st.drag_start_pos) / main
+        set_split_ratio!(fiber, st.drag_start_ratio + delta)
+        mark_window_layout!(fiber)
+    elseif fiber.kind === _SLIDER
+        slider_drag_update!(fiber, x, y)
+    end
+    return nothing
+end
+
+function drag_end!(fiber)
+    return nothing
+end
+
+function slider_drag_update!(fiber, x, y)
+    value = get(fiber.props, :value, nothing)
+    value isa Observable || return
+    lo = float(get(fiber.props, :min, 0))
+    hi = float(get(fiber.props, :max, 1))
+    hi > lo || return
+    rx, _, rw, _ = fiber.rect
+    rw <= 0 && return
+    frac = clamp((x - rx) / rw, 0.0, 1.0)
+    new = lo + frac * (hi - lo)
+    value[] = new
+    mark_window_layout!(fiber)
+    cb = get(fiber.props, :on_change, nothing)
+    cb isa Function && try
+        cb(new)
+    catch err
+        @warn "Rocks: Slider :on_change failed" exception = (err, catch_backtrace())
+    end
+    return nothing
+end
+
 "Nearest `Pressable` ancestor of a fiber, not crossing window boundaries."
 function find_pressable(fiber)
     while fiber !== nothing
@@ -133,6 +223,15 @@ function dispatch_event!(event::SDL_Event)
         fiber === nothing && return
         mx, my = event.button.x, event.button.y
         target = hit_test(fiber, mx, my)
+
+        # start a drag when the press lands on a Split handle or a Slider
+        drag = find_draggable(target, mx, my)
+        if drag !== nothing
+            ACTIVE_DRAG[] = drag
+            drag_start!(drag, mx, my)
+            return
+        end
+
         pressable = find_pressable(target)
         if pressable !== nothing && !Bool(get(pressable.props, :disabled, false))
             ACTIVE_PRESS[(wid, event.button.button)] = pressable
@@ -142,6 +241,11 @@ function dispatch_event!(event::SDL_Event)
         end
     elseif ty == SDL_MOUSEBUTTONUP
         wid = event.button.windowID
+        if ACTIVE_DRAG[] !== nothing
+            drag_end!(ACTIVE_DRAG[])
+            ACTIVE_DRAG[] = nothing
+            return
+        end
         pressable = pop!(ACTIVE_PRESS, (wid, event.button.button), nothing)
         pressable === nothing && return
         mx, my = event.button.x, event.button.y
@@ -154,9 +258,13 @@ function dispatch_event!(event::SDL_Event)
         mark_window_draw!(wid)
     elseif ty == SDL_MOUSEMOTION
         wid = event.motion.windowID
+        mx, my = event.motion.x, event.motion.y
+        if ACTIVE_DRAG[] !== nothing
+            drag_update!(ACTIVE_DRAG[], mx, my)
+            return
+        end
         fiber = get(WINDOW_BY_ID, wid, nothing)
         fiber === nothing && (set_hover!(wid, nothing); return)
-        mx, my = event.motion.x, event.motion.y
         target = hit_test(fiber, mx, my)
         set_hover!(wid, find_pressable(target))
     elseif ty == SDL_KEYDOWN

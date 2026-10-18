@@ -3,6 +3,8 @@
 # All SDL calls live in this file (plus events.jl/runtime.jl), keeping the
 # reconciler and layout logic headless-testable.
 
+using Downloads
+
 # ---- colors --------------------------------------------------------------
 
 # Normalize a user color into (r, g, b, a) bytes.
@@ -142,6 +144,26 @@ mutable struct PressState
     pressed::Bool
 end
 
+mutable struct ImageState
+    texture::Ptr{SDL_Texture}
+    w::Float64 # natural size of the loaded image
+    h::Float64
+    src::String
+    renderer::Ptr{SDL_Renderer}
+end
+
+mutable struct SplitState
+    ratio::Float64 # internal split position when `ratio` is not an Observable
+    seeded::Bool
+    handle_rect::Tuple{Float64,Float64,Float64,Float64}
+    drag_start_ratio::Float64
+    drag_start_pos::Float64
+end
+
+mutable struct SliderState
+    handle_rect::Tuple{Float64,Float64,Float64,Float64}
+end
+
 # SDL init / shutdown ------------------------------------------------------
 
 const BACKEND_INITIALIZED = Ref(false)
@@ -151,6 +173,7 @@ function init_backend()
     rc = SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)
     rc == 0 || error("SDL_Init failed: $(unsafe_string(SDL_GetError()))")
     TTF_Init() == 0 || error("TTF_Init failed: $(unsafe_string(SDL_GetError()))")
+    IMG_Init(Cint(IMG_INIT_PNG) | Cint(IMG_INIT_JPG)) # best effort; PNG/JPG cover common formats
     BACKEND_INITIALIZED[] = true
     return nothing
 end
@@ -414,6 +437,95 @@ function free_text!(state::TextState)
     return nothing
 end
 
+# ---- images --------------------------------------------------------------
+
+const IMAGE_CACHE_DIR = Ref{Union{Nothing,String}}(nothing)
+
+# Cached loaded surfaces, keyed by resolved source path. Surfaces are
+# renderer-independent and kept for the session so measuring and drawing an
+# image read the file only once.
+const IMAGE_SURFACES = Dict{String,Ptr{SDL_Surface}}()
+
+# Resolve an `Image` `src` prop: local paths pass through; URLs are fetched
+# with `Downloads` into a per-session cache directory. Returns `nothing` when
+# the source cannot be resolved.
+function resolve_image_src(src)
+    isempty(src) && return nothing
+    if startswith(src, "http://") || startswith(src, "https://")
+        if IMAGE_CACHE_DIR[] === nothing
+            IMAGE_CACHE_DIR[] = mkpath(joinpath(tempdir(), "rocks-images"))
+        end
+        name = string(hash(src), ".", lowercase(splitext(src)[2]))
+        path = joinpath(IMAGE_CACHE_DIR[], name)
+        isfile(path) && return path
+        try
+            Downloads.download(src, path)
+        catch err
+            @warn "Rocks: could not download image" src exception = err
+            return nothing
+        end
+        return path
+    end
+    return isfile(src) ? src : nothing
+end
+
+# Loaded surface for an image source (cached). Returns C_NULL when the image
+# cannot be loaded.
+function image_surface(src::String)
+    return get!(IMAGE_SURFACES, src) do
+        path = resolve_image_src(src)
+        path === nothing && return C_NULL
+        surface = IMG_Load(path)
+        surface == C_NULL && @warn "Rocks: could not load image" src path
+        return surface
+    end
+end
+
+function free_image!(state::ImageState)
+    state.texture != C_NULL && SDL_DestroyTexture(state.texture)
+    state.texture = C_NULL
+    state.renderer = C_NULL
+    return nothing
+end
+
+# (Re)create the texture of an Image fiber if its `src` changed.
+function ensure_image!(fiber, renderer)
+    src = string(get(fiber.props, :src, ""))
+    state = fiber.host
+    if state isa ImageState && state.src == src && state.renderer == renderer
+        return state
+    end
+    state === nothing || free_image!(state)
+    texture, w, h = C_NULL, 0.0, 0.0
+    surface = image_surface(src)
+    if surface != C_NULL
+        texture = SDL_CreateTextureFromSurface(renderer, surface)
+        if texture == C_NULL
+            @warn "Rocks: could not create texture for image" src
+        else
+            w_ref, h_ref = Ref{Cint}(0), Ref{Cint}(0)
+            SDL_QueryTexture(texture, C_NULL, C_NULL, w_ref, h_ref)
+            w, h = Float64(w_ref[]), Float64(h_ref[])
+        end
+    end
+    fiber.host = ImageState(texture, w, h, src, renderer)
+    return fiber.host
+end
+
+function draw_image!(fiber, renderer)
+    state = ensure_image!(fiber, renderer)
+    x, y, w, h = fiber.rect
+    if state.texture == C_NULL
+        # placeholder while missing/failed
+        set_color(renderer, (0.20, 0.20, 0.24))
+        fill_rect(renderer, x, y, w, h)
+        return
+    end
+    dst = SDL_Rect(round(Int, x), round(Int, y), round(Int, w), round(Int, h))
+    SDL_RenderCopy(renderer, state.texture, C_NULL, Ref(dst))
+    return nothing
+end
+
 # ---- the draw pass -------------------------------------------------------
 
 """
@@ -438,12 +550,52 @@ function draw!(fiber, renderer)
         end
         return
     end
+    if fiber.kind === _IMAGE
+        draw_image!(fiber, renderer)
+        return
+    end
+    if fiber.kind === _SLIDER
+        draw_slider!(fiber, renderer)
+        return
+    end
     if fiber.kind === _BOX || fiber.kind === _PRESSABLE
         draw_background!(fiber, renderer)
     end
     for child in fiber.children
         draw!(child, renderer)
     end
+    if fiber.kind === _SPLIT
+        draw_split_handle!(fiber, renderer)
+    end
+    return nothing
+end
+
+# The draggable handle of a Split, drawn after its panes.
+function draw_split_handle!(fiber, renderer)
+    state = fiber.host
+    state isa SplitState || return
+    hx, hy, hw, hh = state.handle_rect
+    set_color(renderer, get(fiber.props, :handle_color, (0.35, 0.35, 0.40)))
+    fill_rect(renderer, hx, hy, hw, hh)
+    return nothing
+end
+
+# The track, filled portion and knob of a Slider.
+function draw_slider!(fiber, renderer)
+    value = get(fiber.props, :value, nothing)
+    value isa Observable || return
+    x, y, w, h = fiber.rect
+    lo = float(get(fiber.props, :min, 0))
+    hi = float(get(fiber.props, :max, 1))
+    frac = clamp((value[] - lo) / max(hi - lo, eps()), 0.0, 1.0)
+    track_h = 4.0
+    knob = 12.0
+    accent = get(ACCENTS, Symbol(get(fiber.props, :color, :primary)), ACCENTS[:primary])
+    set_color(renderer, (0.28, 0.28, 0.32))
+    fill_rect(renderer, x, y + (h - track_h) / 2, w, track_h)
+    set_color(renderer, accent)
+    fill_rect(renderer, x, y + (h - track_h) / 2, w * frac, track_h)
+    fill_rect(renderer, x + (w - knob) * frac, y + (h - knob) / 2, knob, knob)
     return nothing
 end
 

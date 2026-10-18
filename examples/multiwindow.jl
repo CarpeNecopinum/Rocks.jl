@@ -37,4 +37,6 @@ function App()
         open[] && @rock SecondWindow())
 end
 
-render(App)
+if abspath(PROGRAM_FILE) == @__FILE__
+    render(App)
+end

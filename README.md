@@ -161,8 +161,7 @@ makes `render` return.
 
 ### Built-in elements
 
-Akin to React Native, styling is left to the user. Rocks only provides
-primitives:
+Akin to React Native, styling is left to the user. Rocks provides primitives:
 
 * **`Window`** — an OS window.
 * **`Box`** — a rectangular container with an optional `background`,
@@ -179,6 +178,48 @@ primitives:
   pointer events. Props: `on_press`, `on_press_in`, `on_press_out`,
   `on_hover_in`, `on_hover_out`, `disabled`, and `background`,
   `hover_background`, `pressed_background` for state-dependent styling.
+* **`Image`** — a graphics file (PNG/JPG/BMP/... via SDL2_image). `src` is a
+  path or an URL (fetched with `Downloads` and cached); `width`/`height`
+  scale it (keeping the aspect ratio when only one is given).
+* **`Split`** — a resizable divider: the first two children are panes
+  separated by a draggable handle. Props: `direction` (`:horizontal`/
+  `:vertical`), `ratio` (an `Observable` — controlled by dragging — or a
+  number for the initial position), `handle` (thickness), `handle_color`,
+  `width`, `height`.
+* **`Slider`** — click or drag to set a value. Props: `value` (an
+  `Observable`, required), `min`, `max`, `width`, `height`, `color`,
+  `on_change(value)`.
+
+Plus pre-styled components (Material-UI-inspired, built on the primitives):
+
+* **`Button`** — `variant` (`:contained`, `:outlined`, `:text`), `color`
+  (`:primary`, `:secondary`, `:success`, `:error`, `:warning`, `:info`),
+  `size` (`:small`, `:medium`, `:large`), `label`/children, `on_press`,
+  `disabled`.
+* **`Checkbox`** / **`Toggle`** — boolean controls bound to an
+  `Observable{Bool}` `value`; optional `label` (Checkbox) and `on_change`.
+* **`RadioGroup`** — `options::Vector{String}` and an `Observable{Int}`
+  `selected` index.
+* **`DropDownMenu`** — expanding dropdown with `options` and an
+  `Observable{Int}` `selected`.
+* **`Tabber`** — tab bar + content: `tabs::Vector{String}`, an
+  `Observable{Int}` `selected`, and one `children` element per tab.
+* **`ProgressBar`** — an `Observable` `value` between 0 and 1.
+
+```julia
+function Settings()
+    dark = @use Observable(false)
+    size = @use Observable(2)
+    @rock Window(
+        @rock Column(
+            @rock Toggle(; value = dark),
+            @rock Checkbox("Show grid"; value = show_grid),
+            @rock RadioGroup(["Small", "Medium", "Large"]; selected = size),
+            @rock Button("Apply"; on_press = apply, variant = :contained);
+            gap = 12, padding = 20);
+        title = "Settings", width = 320, height = 280)
+end
+```
 
 Colors are tuples of 3–4 numbers (all-integer → 0–255, any-float → 0–1),
 hex strings (`"#f00"`, `"#00ff00"`, `"#rrggbbaa"`) or ColorTypes colors.
@@ -201,12 +242,18 @@ bubbling up to the nearest `Pressable` ancestor, like DOM event targets.
 
 ## Examples
 
-See [`examples/`](examples/): `counter.jl`, `clock.jl`, `multiwindow.jl`
-and `dialog.jl`.
+See [`examples/`](examples/): `counter.jl`, `clock.jl`, `multiwindow.jl`,
+`dialog.jl`, `widgets.jl` (a tour of the pre-styled widgets) and `image.jl`
+(the `Image` element with a generated gradient BMP).
 
 ```shell
 julia --project examples/counter.jl
+julia --project examples/widgets.jl
 ```
+
+Examples are includable: `include("examples/widgets.jl")` defines their
+components without rendering (the `render` call is guarded by
+`abspath(PROGRAM_FILE) == @__FILE__`).
 
 ## Testing
 

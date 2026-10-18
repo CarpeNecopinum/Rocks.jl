@@ -18,6 +18,9 @@ struct _WindowKind <: HostKind end
 struct _BoxKind <: HostKind end
 struct _TextKind <: HostKind end
 struct _PressableKind <: HostKind end
+struct _ImageKind <: HostKind end
+struct _SplitKind <: HostKind end
+struct _SliderKind <: HostKind end
 
 """
     Window
@@ -90,11 +93,55 @@ Props: `on_press`, `on_press_in`, `on_press_out`, `on_hover_in`,
 """
 const Pressable = _PressableKind()
 
+"""
+    Image
+
+Host element kind for a graphics file. `src` is a path or an URL (fetched
+with `Downloads` and cached in a temporary directory) to a PNG/JPG/BMP/...
+file, loaded through SDL2_image.
+
+Props: `src` (required), `width`/`height` — scale to `width` (keeping the
+aspect ratio) when only one is given, stretch when both are given, natural
+size when neither.
+"""
+const Image = _ImageKind()
+
+"""
+    Split
+
+Host element kind for a resizable split: the first two children are the two
+panes, separated by a draggable handle that resizes them. Useful as a window
+divider.
+
+Props: `direction` (`:horizontal` — panes side by side, or `:vertical` —
+panes stacked), `ratio` — an `Observable` (controlled: dragging writes it) or
+a number (the initial split position, default 0.5), `handle` (handle
+thickness in px, default 6), `handle_color`, `width`, `height`. The panes are
+laid out to fill their side of the split exactly, so give them backgrounds to
+see them.
+"""
+const Split = _SplitKind()
+
+"""
+    Slider
+
+Host element kind for a slider: click or drag anywhere on it to set its
+value.
+
+Props: `value` — an `Observable` (required; dragging writes it), `min` and
+`max` (default 0 and 1), `width` (default 200), `height` (default 24), and an
+`on_change(value)` callback fired while the value changes.
+"""
+const Slider = _SliderKind()
+
 # Internal aliases used throughout the implementation.
 const _WINDOW = Window
 const _BOX = Box
 const _TEXT = Text
 const _PRESSABLE = Pressable
+const _IMAGE = Image
+const _SPLIT = Split
+const _SLIDER = Slider
 
 is_host(kind) = kind isa HostKind
 
@@ -131,7 +178,18 @@ struct Element
     end
 end
 
-props_dict(; kwargs...) = Dict{Symbol,Any}(kwargs)
+props_dict(args...; kwargs...) = begin
+    dict = Dict{Symbol,Any}()
+    for a in args
+        a isa Pair ||
+            error("expected `name = value` or splatted pairs after the semicolon in @rock, got: $a")
+        dict[Symbol(a.first)] = a.second
+    end
+    for (k, v) in kwargs
+        dict[Symbol(k)] = v
+    end
+    dict
+end
 
 """
     @rock Kind(children...; props...)
@@ -173,6 +231,13 @@ macro rock(call)
         # expressions (macrocalls, conditionals like `open && @rock B()`) are
         # passed through as child expressions. The resulting tuple is
         # flattened into the parent's children.
+        for item in call.args
+            item isa Expr && item.head === :kw && error(
+                "a prop (`$(item.args[1]) = ...`) after a trailing comma was " *
+                "captured by the previous @rock call — put props after the " *
+                "`;` separator instead",
+            )
+        end
         items = Any[
             item isa Expr && item.head === :call ?
             Expr(:macrocall, Symbol("@rock"), __source__, item) : item

@@ -51,9 +51,12 @@ include("layout.jl")
 include("events.jl")
 include("runtime.jl")
 include("components.jl")
+include("widgets.jl")
 
 export @rock, @use, render, quit!,
        Window, Box, Text, Pressable, Row, Column,
+       Image, Split, Slider,
+       Button, Checkbox, Toggle, RadioGroup, DropDownMenu, Tabber, ProgressBar,
        useEffect, useMemo, useCallback,
        useInterval, useTimeout,
        set_default_font!, load_font

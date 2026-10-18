@@ -49,4 +49,6 @@ function App()
             on_cancel = () -> open[] = false))
 end
 
-render(App)
+if abspath(PROGRAM_FILE) == @__FILE__
+    render(App)
+end
