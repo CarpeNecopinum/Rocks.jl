@@ -45,10 +45,12 @@ timer — an idle application draws nothing.
 
 ## Build & Test
 
-- Tests (headless, uses `SDL_VIDEODRIVER=dummy`):
-  `julia --project=. -e 'using Pkg; Pkg.test()'`
+- Tests (headless, uses `SDL_VIDEODRIVER=dummy`; includes pixel-verified
+  screenshot tests): `julia --project=. -e 'using Pkg; Pkg.test()'`
 - Run an example (needs a display):
   `julia --project=. examples/counter.jl`
+- Run an example headlessly with a captured screenshot:
+  `SDL_VIDEODRIVER=dummy julia --project=. examples/screenshot.jl`
 - After dependency changes: `julia --project=. -e 'using Pkg; Pkg.resolve()'`
 
 ## Conventions

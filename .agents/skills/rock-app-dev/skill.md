@@ -106,3 +106,9 @@ Headless (no display needed): set `ENV["SDL_VIDEODRIVER"] = "dummy"` before
 SDL initializes; render into a fiber tree with `Rocks.create_root` +
 `Rocks.perform_render!`, or run the full `render(App)` with a
 `useTimeout(quit!, ms)`.
+
+Screenshots: `Rocks.screenshot(window, path)` writes a window's current frame
+to a PNG — the pixels come from the renderer's backbuffer, so this works
+headlessly too (`SDL_VIDEODRIVER=dummy` renders real pixels; no Xvfb needed).
+Semi-headless runs: `render(App; frames = N, screenshot = path)` runs `N`
+frames and captures the first window before shutting down.

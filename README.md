@@ -269,8 +269,9 @@ bubbling up to the nearest `Pressable` ancestor, like DOM event targets.
 ## Examples
 
 See [`examples/`](examples/): `counter.jl`, `clock.jl`, `multiwindow.jl`,
-`dialog.jl`, `widgets.jl` (a tour of the pre-styled widgets) and `image.jl`
-(the `Image` element with a generated gradient BMP).
+`dialog.jl`, `widgets.jl` (a tour of the pre-styled widgets), `image.jl`
+(the `Image` element with a generated gradient BMP) and `screenshot.jl`
+(bounded-frame rendering with a captured PNG).
 
 ```shell
 julia --project examples/counter.jl
@@ -281,10 +282,38 @@ Examples are includable: `include("examples/widgets.jl")` defines their
 components without rendering (the `render` call is guarded by
 `abspath(PROGRAM_FILE) == @__FILE__`).
 
+## Screenshots and headless runs
+
+`screenshot(window, path)` captures a window's current frame into a PNG file.
+`window` is the root fiber of a rendered tree (the first window found is
+captured) or a window fiber; the window is redrawn first, so the file
+reflects the current tree. The pixels come from the renderer's backbuffer,
+not the windowing system — so this works in normal windows *and* headlessly
+with `SDL_VIDEODRIVER=dummy`, whose software renderer writes real pixels:
+
+```julia
+root = render(App; frames = 3, screenshot = "app.png")  # bounded + captured
+```
+
+`render` takes two runtime keyword arguments that are *not* passed to the
+component as props: `frames = N` stops the loop after `N` frames (each frame
+waits up to ~250ms for events) and `screenshot = path` captures the first
+window right before the application shuts down. Together they enable fully
+headless runs — no window is ever shown, but the capture still contains real
+pixels:
+
+```shell
+SDL_VIDEODRIVER=dummy julia --project examples/screenshot.jl
+```
+
+The test suite uses this to pixel-verify captured screenshots without any
+display (see `png_pixel` in `test/runtests.jl`).
+
 ## Testing
 
 The test suite runs headless (SDL's dummy video driver), so it works without
-a display:
+a display — layout, events, screenshots and down-to-the-pixel render
+verification all run against the dummy driver's software renderer:
 
 ```shell
 julia --project -e 'using Pkg; Pkg.test()'

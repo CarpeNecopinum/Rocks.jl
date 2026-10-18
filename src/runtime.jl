@@ -88,6 +88,18 @@ windows that need it: after a render pass, when the window manager exposed
 them (covered, restored), after a resize, or on hover/press styling changes.
 An idle application neither redraws nor burns CPU.
 
+Two keyword arguments control the runtime itself instead of being passed as
+props: `frames = N` stops the loop after `N` frames (each frame blocks for
+up to ~250ms waiting for events), and `screenshot = path` captures the first
+window into a PNG file right before the application shuts down. Together
+they enable fully headless runs — no window is ever shown, but
+[`screenshot`](@ref) still captures real pixels (with
+`SDL_VIDEODRIVER=dummy`):
+
+```julia
+render(App; frames = 3, screenshot = "app.png")
+```
+
 Note: like `ReactDOM.render`. `Rocks.run` is available as a qualified alias
 if you prefer React's naming (`using Rocks` makes plain `run` ambiguous with
 `Base.run`).
@@ -97,13 +109,18 @@ function render(app; kwargs...)
     RUNNING[] = true
     DIRTY[] = true
     init_backend()
-    root = create_root(app, values(kwargs))
+    kw = values(kwargs)
+    frames = get(kw, :frames, nothing)
+    shot = get(kw, :screenshot, nothing)
+    kw = Base.structdiff(kw, (frames = nothing, screenshot = nothing))
+    root = create_root(app, kw)
     root.mounted = true
     try
         perform_render!(root)
         run_effects!()
         event = Ref{SDL_Event}()
         windows = Fiber[]
+        frame = 0
         while RUNNING[]
             # Block until the next event or until the next timer is due, so
             # an idle application neither redraws nor burns CPU.
@@ -154,7 +171,11 @@ function render(app; kwargs...)
                 state.needs_draw = false
                 w.hidden || draw_window!(w)
             end
+            frame += 1
+            frames isa Integer && frame >= frames && (RUNNING[] = false)
         end
+        # Semi-headless runs: capture before the windows are torn down.
+        shot !== nothing && screenshot(root, String(shot))
     finally
         unmount!(root)
         RUNNING[] = false

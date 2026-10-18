@@ -323,7 +323,7 @@ function set_color(renderer, color)
 end
 
 function fill_rect(renderer, x, y, w, h)
-    w <= 0 || h <= 0 || return
+    (w <= 0 || h <= 0) && return
     rect = SDL_Rect(round(Int, x), round(Int, y), round(Int, w), round(Int, h))
     SDL_RenderFillRect(renderer, Ref(rect))
     return nothing
@@ -602,12 +602,13 @@ end
 const DEFAULT_WINDOW_BACKGROUND = (0.12, 0.12, 0.14)
 
 """
-    draw_window!(fiber)
+    draw_window!(fiber, present = true)
 
 Clear the OS window of a window fiber with its background and draw its
-children, then present.
+children, then present. [`screenshot`](@ref) draws with `present = false` to
+read the backbuffer before presenting.
 """
-function draw_window!(fiber)
+function draw_window!(fiber, present::Bool = true)
     state = fiber.host
     state isa WindowState || return
     renderer = state.renderer
@@ -616,6 +617,70 @@ function draw_window!(fiber)
     for child in fiber.children
         draw!(child, renderer)
     end
-    SDL_RenderPresent(renderer)
+    present && SDL_RenderPresent(renderer)
     return nothing
+end
+
+# The first fiber in a subtree with a live OS window.
+function find_window_fiber(fiber)
+    is_window(fiber) && fiber.host isa WindowState && return fiber
+    for child in fiber.children
+        found = find_window_fiber(child)
+        found !== nothing && return found
+    end
+    return nothing
+end
+
+"""
+    screenshot(window, path) -> path
+
+Capture the current frame of a window into a PNG file at `path` and return
+`path`. `window` is the root fiber of a rendered tree (the first window found
+in the tree is captured) or a window fiber. The window is redrawn before the
+capture, so the file reflects the current tree and state; the screen keeps
+showing the redrawn frame afterwards.
+
+Works in normal windows and headlessly (SDL's dummy driver writes real
+pixels with a software renderer), which makes pixel-verified screenshot
+tests possible without any display:
+
+```julia
+root = render(App; frames = 3, screenshot = "app.png")  # capture and quit
+```
+
+For trees with several windows, pass the specific window fiber to capture a
+different one.
+"""
+function screenshot(window, path::AbstractString)
+    window isa Fiber ||
+        error("screenshot expects a rendered window or root fiber, got: $(typeof(window))")
+    fiber = find_window_fiber(window)
+    fiber === nothing &&
+        error("no rendered window found in the given fiber tree")
+    state = fiber.host
+    w_ref, h_ref = Ref{Cint}(0), Ref{Cint}(0)
+    SDL_GetWindowSize(state.ptr, w_ref, h_ref)
+    w, h = max(Int(w_ref[]), 1), max(Int(h_ref[]), 1)
+    # Redraw without presenting so the backbuffer holds the current frame,
+    # read it, then present the redrawn frame.
+    draw_window!(fiber, false)
+    surface = SDL_CreateRGBSurfaceWithFormat(
+        UInt32(0), Cint(w), Cint(h), Cint(32), UInt32(SDL_PIXELFORMAT_RGBA32),
+    )
+    surface == C_NULL &&
+        error("SDL_CreateRGBSurfaceWithFormat failed: $(unsafe_string(SDL_GetError()))")
+    s = unsafe_load(surface)
+    rect = SDL_Rect(Cint(0), Cint(0), Cint(w), Cint(h))
+    rc = SDL_RenderReadPixels(
+        state.renderer, Ref(rect), UInt32(SDL_PIXELFORMAT_RGBA32), s.pixels, s.pitch,
+    )
+    ok = Cint(0)
+    if rc == 0
+        ok = IMG_SavePNG(surface, String(path))
+    end
+    SDL_FreeSurface(surface)
+    SDL_RenderPresent(state.renderer)
+    rc != 0 && error("SDL_RenderReadPixels failed: $(unsafe_string(SDL_GetError()))")
+    ok != 0 && error("IMG_SavePNG failed: $(unsafe_string(SDL_GetError()))")
+    return path
 end

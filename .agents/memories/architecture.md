@@ -29,3 +29,11 @@ Key architecture decisions of Rocks.jl (React-style GUI framework on SDL2):
 - **Testing**: headless via `SDL_VIDEODRIVER=dummy`; synthetic events are
   pushed through the real `dispatch_event!`; `FONT_CACHE` must be cleared
   on `TTF_Quit` (stale pointers segfault).
+- **Screenshots**: `screenshot(window, path)` redraws the window without
+  presenting, reads the backbuffer with `SDL_RenderReadPixels` into an
+  `SDL_PIXELFORMAT_RGBA32` surface and saves it with `IMG_SavePNG`. The
+  pixels come from the renderer, not the video driver: the dummy driver
+  implements window framebuffers, so pixel tests work fully headless with
+  `SDL_VIDEODRIVER=dummy` (verified: dummy, `offscreen` and x11/Xvfb produce
+  identical pixels; an xvfb layer was built and then dropped as
+  unnecessary). Headless runs use `render(app; frames, screenshot)`.

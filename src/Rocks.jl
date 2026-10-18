@@ -53,7 +53,7 @@ include("runtime.jl")
 include("components.jl")
 include("widgets.jl")
 
-export @rock, @use, render, quit!,
+export @rock, @use, render, quit!, screenshot,
        Window, Box, Text, Pressable, Row, Column,
        Image, Split, Slider,
        Button, Checkbox, Toggle, RadioGroup, DropDownMenu, Tabber, ProgressBar,

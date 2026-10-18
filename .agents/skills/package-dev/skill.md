@@ -57,11 +57,21 @@ their children into the window rect.
 - Synthetic pointer events: build an `SDL_Event`, `SDL_PushEvent`, then
   `Rocks.dispatch_event!` through the real path (see `push_mouse!` in
   `test/runtests.jl`).
+- Pixel tests: `Rocks.screenshot(window, path)` captures a window to PNG
+  (works with the dummy driver — the pixels come from the renderer's
+  backbuffer, not the windowing system); sample pixels by loading the PNG
+  and converting to `SDL_PIXELFORMAT_RGBA32` (see `png_pixel` in
+  `test/runtests.jl`).
+- No Xvfb is needed: screenshots render identically under
+  `SDL_VIDEODRIVER=dummy` (evaluated: the dummy driver implements window
+  framebuffers; `offscreen` behaves the same; x11/Xvfb only adds the real
+  X11 code path, not pixels).
 - Never let `TTF_Quit` run without clearing `FONT_CACHE` (see
   `shutdown_backend`) — stale font pointers segfault.
 
 ## Commands
 
 - Test: `julia --project=. -e 'using Pkg; Pkg.test()'`
+- Headless screenshot: `SDL_VIDEODRIVER=dummy julia --project=. examples/screenshot.jl`
 - Resolve after deps change: `julia --project=. -e 'using Pkg; Pkg.resolve()'`
 - Example: `julia --project=. examples/counter.jl`

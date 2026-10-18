@@ -13,6 +13,10 @@ using SimpleDirectMediaLayer.LibSDL2:
     SDL_FillRect,
     SDL_MapRGB,
     SDL_FreeSurface,
+    SDL_GetError,
+    SDL_ConvertSurfaceFormat,
+    IMG_Load,
+    SDL_PIXELFORMAT_RGBA32,
     SDL_PIXELFORMAT_RGB24,
     SDL_SCANCODE_ESCAPE,
     SDLK_ESCAPE
@@ -58,6 +62,21 @@ drain_events!() = begin
     while SDL_PollEvent(ev) == 1
         Rocks.dispatch_event!(ev[])
     end
+end
+
+# (r, g, b, a) of the pixel at (x, y) of a PNG file.
+function png_pixel(path, x, y)
+    surf = IMG_Load(path)
+    surf == C_NULL && error("could not load $path: $(unsafe_string(SDL_GetError()))")
+    conv = SDL_ConvertSurfaceFormat(surf, UInt32(SDL_PIXELFORMAT_RGBA32), UInt32(0))
+    SDL_FreeSurface(surf)
+    conv == C_NULL && error("could not convert surface for $path")
+    s = unsafe_load(conv)
+    bytes = unsafe_wrap(Vector{UInt8}, Ptr{UInt8}(s.pixels), Int(s.pitch) * Int(s.h))
+    i = (y - 1) * Int(s.pitch) + 4 * (x - 1)
+    px = (bytes[i+1], bytes[i+2], bytes[i+3], bytes[i+4])
+    SDL_FreeSurface(conv)
+    return px
 end
 
 function push_mouse!(fiber, type, x, y; button = 1)
@@ -949,5 +968,68 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         @test Rocks._to_rgba("#00ff00") == (0x00, 0xff, 0x00, 0xff)
         @test Rocks._to_rgba(RGBA(1.0, 0.0, 0.0, 0.5)) == (0xff, 0x00, 0x00, 0x80)
         @test Rocks._to_rgba(RGB(0.0, 0.0, 1.0)) == (0x00, 0x00, 0xff, 0xff)
+    end
+
+    @testset "screenshots" begin
+        # Even headlessly (dummy driver + software renderer) the framebuffer
+        # holds real pixels, so screenshots can be captured and verified.
+        RED = (0.9, 0.2, 0.2)
+        GREEN = (0.1, 0.7, 0.3)
+        function App()
+            @rock Window(
+                @rock Box(@rock Text("screenshot"); background = RED, width = 400, height = 300);
+                title = "shots", width = 400, height = 300)
+        end
+        with_tree(App) do root
+            windows = sync_windows!(root)
+            tmp = mktempdir()
+            path = joinpath(tmp, "window.png")
+            @test Rocks.screenshot(root, path) == path
+            @test isfile(path)
+            # the box fills the window: the center pixel is its background
+            @test png_pixel(path, 200, 150) == Rocks._to_rgba(RED)
+            # a specific window fiber can be captured directly
+            @test Rocks.screenshot(windows[1], joinpath(tmp, "second.png")) == joinpath(tmp, "second.png")
+            @test isfile(joinpath(tmp, "second.png"))
+            # error cases: an element is not a rendered tree; a tree without
+            # a rendered window has nothing to capture
+            @test_throws ErrorException Rocks.screenshot(App(), path)
+            @test_throws ErrorException Rocks.screenshot(
+                Rocks.create_root(() -> nothing, NamedTuple()), path)
+        end
+
+        # render with bounded frames + capture — the headless workflow.
+        shot = joinpath(mktempdir(), "render.png")
+        function CounterApp()
+            @rock Window(
+                @rock Box(background = GREEN, width = 200, height = 100);
+                title = "green", width = 200, height = 100)
+        end
+        render(CounterApp; frames = 1, screenshot = shot)
+        @test isfile(shot)
+        @test png_pixel(shot, 100, 50) == Rocks._to_rgba(GREEN)
+
+        # render must reject the runtime kwargs as component props.
+        @test_throws MethodError render(CounterApp; frames = 1, nonsense = 2)
+
+        # Several windows: each window fiber can be captured individually.
+        function TwoApp()
+            @rock Window(
+                @rock Box(background = RED, width = 300, height = 200);
+                title = "red", width = 300, height = 200),
+            @rock Window(
+                @rock Box(background = GREEN, width = 200, height = 150);
+                title = "green", width = 200, height = 150)
+        end
+        with_tree(TwoApp) do root
+            windows = sync_windows!(root)
+            tmp = mktempdir()
+            red = joinpath(tmp, "red.png")
+            green = joinpath(tmp, "green.png")
+            Rocks.screenshot(windows[1], red)
+            Rocks.screenshot(windows[2], green)
+            @test png_pixel(red, 150, 100) == Rocks._to_rgba(RED)
+            @test png_pixel(green, 100, 75) == Rocks._to_rgba(GREEN)
+        end
     end
 end
