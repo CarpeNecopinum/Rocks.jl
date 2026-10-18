@@ -191,6 +191,8 @@ function unmount!(fiber)
             catch err
                 @warn "Rocks: unmount cleanup failed" exception = (err, catch_backtrace())
             end
+        elseif hook isa UseHook && hook.subscription !== nothing
+            off(hook.subscription)
         end
     end
     empty!(fiber.hooks)

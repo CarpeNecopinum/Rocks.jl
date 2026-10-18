@@ -16,7 +16,7 @@ using Rocks
 import Rocks: Text # disambiguate Rocks.Text from Base.Text
 
 function Counter()
-    count, set_count = useState(0)
+    count = @use Observable(0)
     @rock Window(
         @rock Text("Count: ", count; size = 32),
         @rock Pressable(
@@ -99,20 +99,33 @@ conditional hooks), exactly like React.
 
 | Hook | Purpose |
 | --- | --- |
-| `useState(initial)` | State; returns `(value, setter)`. The setter takes a value or an updater function. |
+| `@use expr` | State. `expr` creates a `Ref` or an `Observable` on the first render and is returned on every render. Setting an `Observable` re-renders; `Ref`s are silent. |
 | `useEffect(f, deps = nothing)` | Side effects after render. `nothing` = every render, `()` = once on mount, `(x,)` = when `x` changes. Return a cleanup function from `f`. |
-| `useRef(initial)` | Mutable box (`.current`) that survives re-renders without triggering them. |
 | `useMemo(f, deps)` / `useCallback(f, deps)` | Memoization. |
 | `useInterval(f, ms)` / `useTimeout(f, ms)` | Timers, cleaned up automatically on unmount. |
 
+State is a `Ref` or an `Observable` created with `@use` — read and write it
+with `obs[]`:
+
 ```julia
-function Stopwatch()
-    elapsed, set_elapsed = useState(0)
-    running, set_running = useState(false)
-    useEffect(() -> running && useInterval(() -> set_elapsed(e -> e + 1), 1000))
-    ...
+function Counter()
+    count = @use Observable(0)
+    @rock Window(
+        @rock Text("Count: ", count[]),
+        @rock Pressable(
+            @rock Text("Increment");
+            on_press = () -> count[] += 1);
+        title = "Counter")
 end
 ```
+
+Because the observable itself is returned, state can be shared and derived
+without extra libraries: `@use someGlobalObservable` subscribes to a global
+observable, `@use observablePassedInAsProp` to one owned by a parent, and
+`@use map(x -> x.sub, obs)` derives a sub-state whose changes alone trigger
+a re-render (setting an observable to an identical value never re-renders).
+`@use Ref(0)` replaces React-style `useRef` — mutate `ref[]` silently and
+call `request_render()` when a redraw is needed.
 
 ### Windows are components
 
@@ -122,11 +135,11 @@ rendering:
 
 ```julia
 function App()
-    open, set_open = useState(false)
+    open = @use Observable(false)
     @rock Window(
-        @rock Pressable(@rock Text("Open dialog"); on_press = () -> set_open(true));
+        @rock Pressable(@rock Text("Open dialog"); on_press = () -> open[] = true);
         title = "Main", width = 400, height = 300,
-        open && @rock Dialog())
+        open[] && @rock Dialog())
 end
 
 function Dialog()

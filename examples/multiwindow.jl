@@ -14,13 +14,13 @@ function SecondWindow()
 end
 
 function App()
-    open, set_open = useState(false)
+    open = @use Observable(false)
     @rock Window(
         @rock Text("Multi-window demo"; size = 24),
         @rock Text("Toggle the second window:"),
         @rock Pressable(
-            @rock Text(open ? "Close second window" : "Open second window");
-            on_press = () -> set_open(o -> !o),
+            @rock Text(open[] ? "Close second window" : "Open second window");
+            on_press = () -> open[] = !open[],
             background = (0.20, 0.45, 0.95),
             hover_background = (0.25, 0.52, 1.00),
             pressed_background = (0.16, 0.38, 0.82),
@@ -34,7 +34,7 @@ function App()
             padding = 12, align = :center);
         title = "Main window", width = 340, height = 260,
         padding = 24, gap = 16,
-        open && @rock SecondWindow())
+        open[] && @rock SecondWindow())
 end
 
 render(App)

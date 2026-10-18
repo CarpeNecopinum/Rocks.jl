@@ -40,14 +40,22 @@ end
 
 ## Hooks
 
-- `count, set_count = useState(0)` — setter takes a value or `c -> c + 1`.
+- `x = @use Observable(0)` — state as an Observable (re-exported by Rocks):
+  read/write with `x[]`; setting it triggers a re-render (identical values
+  never do). Replaces React-style `useState`.
+- `r = @use Ref(0)` — silent mutable ref: mutate `r[]` freely, call
+  `request_render()` for a manual redraw. Replaces React-style `useRef`.
+- `x = @use someGlobalObservable` / `@use observablePassedInAsProp` —
+  subscribe to shared state; unsubscribed automatically on unmount.
+- `x = @use map(s -> s.sub, obs)` — derived sub-state; the component only
+  re-renders when the mapped value actually changes.
 - `useEffect(f, deps = nothing)` — `nothing` = every render, `()` = once on
   mount, `(x,)` = when `x` changes; `f` may return a cleanup function.
-- `useRef(v)` — mutable `.current`, survives re-renders silently.
 - `useMemo(f, deps)` / `useCallback(f, deps)`.
 - `useInterval(f, ms)` / `useTimeout(f, ms)` — auto-cleaned on unmount.
 - Hooks must be called unconditionally at the top level of a component
-  (React rules apply).
+  (React rules apply); `@use` expressions are evaluated exactly once, on the
+  first render.
 
 ## Windows
 

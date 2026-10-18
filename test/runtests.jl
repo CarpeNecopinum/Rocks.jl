@@ -160,13 +160,13 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
     @testset "hooks" begin
         log = String[]
         function App()
-            count, set_count = useState(0)
-            useEffect(() -> push!(log, "mount:$(count)"), ())
-            useEffect(() -> push!(log, "render:$(count)"))
-            useEffect(() -> push!(log, "dep:$(count)"), (count,))
-            ref = useRef(0)
-            memo = useMemo(() -> count * 10, (count,))
-            @rock Box(@rock Text("count: ", count, " memo: ", memo, " ref: ", ref.current))
+            count = @use Observable(0)
+            useEffect(() -> push!(log, "mount:$(count[])"), ())
+            useEffect(() -> push!(log, "render:$(count[])"))
+            useEffect(() -> push!(log, "dep:$(count[])"), (count[],))
+            ref = @use Ref(0)
+            memo = useMemo(() -> count[] * 10, (count[],))
+            @rock Box(@rock Text("count: ", count[], " memo: ", memo, " ref: ", ref[]))
         end
 
         with_tree(App) do root
@@ -174,24 +174,129 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             text = root.children[1].children[1]
             @test Rocks.text_content(text) == "count: 0 memo: 0 ref: 0"
 
-            # set state via the setter (value and updater form)
-            hook = root.hooks[1]
-            hook.setter(2)
-            @test hook.value == 2
-            hook.setter(c -> c + 1)
-            @test hook.value == 3
-            # identical values do not trigger anything
-            before = length(log)
-            hook.setter(3)
-            @test length(log) == before
+            # set the observable (the hook state holds it)
+            count = root.hooks[1].value
+            @test count isa Observable
+            count[] = 2
+            @test count[] == 2
+            count[] += 1
+            @test count[] == 3
+            # setting an identical value does not trigger a re-render
+            Rocks.DIRTY[] = false
+            count[] = 3
+            @test Rocks.DIRTY[] == false
+            count[] = 4
+            @test Rocks.DIRTY[] == true
 
             Rocks.perform_render!(root)
             Rocks.run_effects!()
             # no-deps effect ran every render; deps effect only on change
-            @test log == ["mount:0", "render:0", "dep:0", "render:3", "dep:3"]
+            @test log == ["mount:0", "render:0", "dep:0", "render:4", "dep:4"]
             @test Rocks.text_content(root.children[1].children[1]) ==
-                  "count: 3 memo: 30 ref: 0"
+                  "count: 4 memo: 40 ref: 0"
         end
+    end
+
+    @testset "@use" begin
+        # local state via Observable
+        function App()
+            count = @use Observable(0)
+            @rock Box(@rock Text("count: ", count[]))
+        end
+        with_tree(App) do root
+            count = root.hooks[1].value
+            @test count[] == 0
+            @test Rocks.text_content(root.children[1].children[1]) == "count: 0"
+            Rocks.DIRTY[] = false
+            count[] = 3
+            @test Rocks.DIRTY[] == true # setting triggers a re-render
+            Rocks.perform_render!(root)
+            @test Rocks.text_content(root.children[1].children[1]) == "count: 3"
+        end
+
+        # refs are silent
+        function RefApp()
+            r = @use Ref(0)
+            @rock Box(@rock Text("ref: ", r[]))
+        end
+        with_tree(RefApp) do root
+            r = root.hooks[1].value
+            Rocks.DIRTY[] = false
+            r[] = 5
+            @test Rocks.DIRTY[] == false # refs do not trigger re-renders
+            @test r[] == 5
+            Rocks.perform_render!(root)
+            @test Rocks.text_content(root.children[1].children[1]) == "ref: 5"
+        end
+
+        # the expression is evaluated exactly once (on the first render)
+        evals = Ref(0)
+        function OnceApp()
+            x = @use begin
+                evals[] += 1
+                Observable(0)
+            end
+            @rock Box(@rock Text("x: ", x[]))
+        end
+        with_tree(OnceApp) do root
+            @test evals[] == 1
+            Rocks.perform_render!(root)
+            Rocks.perform_render!(root)
+            @test evals[] == 1 # not re-evaluated on re-renders
+        end
+
+        # shared/global observables; unmounting unsubscribes
+        shared = Observable(0)
+        function SharedApp()
+            x = @use shared
+            @rock Box(@rock Text("shared: ", x[]))
+        end
+        with_tree(SharedApp) do root
+            @test Rocks.text_content(root.children[1].children[1]) == "shared: 0"
+            Rocks.DIRTY[] = false
+            shared[] = 1
+            @test Rocks.DIRTY[] == true # subscribed while mounted
+            Rocks.perform_render!(root)
+            @test Rocks.text_content(root.children[1].children[1]) == "shared: 1"
+        end
+        Rocks.DIRTY[] = false
+        shared[] = 2
+        @test Rocks.DIRTY[] == false # unsubscribed after unmount
+
+        # derived sub-state with map: re-renders only when it changes
+        state = Observable((a = 1, b = 2))
+        effect_runs = Ref(0)
+        function SubApp()
+            b = @use map(s -> s.b, state)
+            useEffect(() -> (effect_runs[] += 1), (b[],))
+            @rock Box(@rock Text("b: ", b[]))
+        end
+        with_tree(SubApp) do root
+            @test effect_runs[] == 1
+            Rocks.DIRTY[] = false
+            state[] = (a = 5, b = 2) # b unchanged -> no re-render
+            @test Rocks.DIRTY[] == false
+            @test effect_runs[] == 1
+            state[] = (a = 5, b = 9) # b changed -> re-render
+            @test Rocks.DIRTY[] == true
+            Rocks.perform_render!(root)
+            Rocks.run_effects!()
+            @test effect_runs[] == 2
+            @test Rocks.text_content(root.children[1].children[1]) == "b: 9"
+        end
+
+        # unmounting runs the observable subscription cleanup
+        obs = Observable(0)
+        hook_obs = nothing
+        function CleanupApp()
+            x = @use obs
+            hook_obs = x
+            @rock Box(@rock Text("x: ", x[]))
+        end
+        with_tree(CleanupApp) do root
+            @test length(obs.listeners) == 1
+        end
+        @test length(obs.listeners) == 0 # unsubscribed on unmount
     end
 
     @testset "effect cleanup on unmount" begin
@@ -208,15 +313,15 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
 
     @testset "reconciler" begin
         function App()
-            which, set_which = useState(:a)
-            @rock Box(which === :a ? (@rock Text("A")) : (@rock Box(@rock Text("B"))))
+            which = @use Observable(:a)
+            @rock Box(which[] === :a ? (@rock Text("A")) : (@rock Box(@rock Text("B"))))
         end
         with_tree(App) do root
             box = root.children[1]
             @test box.kind === Box
             @test box.children[1].kind === Text # slot holds Text first
-            hook = root.hooks[1]
-            hook.setter(:b)
+            which = root.hooks[1].value
+            which[] = :b
             Rocks.perform_render!(root)
             @test box.children[1].kind === Box # kind change => new fiber
             @test Rocks.text_content(box.children[1].children[1]) == "B"
@@ -224,17 +329,17 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
 
         # growing and shrinking lists
         function List()
-            n, set_n = useState(1)
-            @rock Column((@rock Text("item ", i) for i in 1:n)...)
+            n = @use Observable(1)
+            @rock Column((@rock Text("item ", i) for i in 1:n[])...)
         end
         with_tree(List) do root
             box = root.children[1].children[1] # Column -> Box
             @test length(box.children) == 1
-            hook = root.hooks[1]
-            hook.setter(3)
+            n = root.hooks[1].value
+            n[] = 3
             Rocks.perform_render!(root)
             @test length(box.children) == 3
-            hook.setter(2)
+            n[] = 2
             Rocks.perform_render!(root)
             @test length(box.children) == 2
         end
@@ -306,11 +411,11 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         pressed_log = Ref(0)
         hover_log = Ref(0)
         function App()
-            n, set_n = useState(0)
+            n = @use Observable(0)
             @rock Window(
                 @rock Pressable(
-                    @rock Text("clicked ", n, " times");
-                    on_press = () -> (clicks[] += 1; set_n(c -> c + 1)),
+                    @rock Text("clicked ", n[], " times");
+                    on_press = () -> (clicks[] += 1; n[] += 1),
                     on_press_in = () -> (pressed_log[] += 1),
                     on_hover_in = () -> (hover_log[] += 1),
                     padding = 10);
@@ -393,13 +498,13 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             @rock Window(@rock Text("dialog"); title = "Dialog", width = 250, height = 150)
         end
         function App()
-            open, set_open = useState(false)
+            open = @use Observable(false)
             @rock Column(
                 @rock Window(
                     @rock Text("main"),
-                    @rock Pressable(@rock Text("toggle"); on_press = () -> set_open(o -> !o));
+                    @rock Pressable(@rock Text("toggle"); on_press = () -> open[] = !open[]);
                     title = "Main", width = 300, height = 200),
-                open && @rock Dialog();
+                open[] && @rock Dialog();
                 padding = 0)
         end
         with_tree(App) do root
@@ -407,8 +512,8 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             @test length(windows) == 1
             @test unsafe_string(SDL_GetWindowTitle(windows[1].host.ptr)) == "Main"
 
-            hook = root.hooks[1]
-            hook.setter(true)
+            open = root.hooks[1].value
+            open[] = true
             Rocks.perform_render!(root)
             Rocks.run_effects!()
             windows = sync_windows!(root)
@@ -416,7 +521,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             titles = Set(unsafe_string(SDL_GetWindowTitle(w.host.ptr)) for w in windows)
             @test titles == Set(["Main", "Dialog"])
 
-            hook.setter(false)
+            open[] = false
             Rocks.perform_render!(root)
             Rocks.run_effects!()
             windows = sync_windows!(root)

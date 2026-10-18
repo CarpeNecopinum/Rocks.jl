@@ -7,11 +7,14 @@ kind: agents
 Rocks.jl is a React(Native)-style GUI framework in Julia built on SDL2
 (SimpleDirectMediaLayer.jl). Components are plain Julia functions; the
 `@rock` macro plays the role of React's `createElement` — it applies to a
-*call* to the kind (`@rock Text("hi"); size = 12`), children as positional
-arguments, props as keyword arguments; hooks track component
-lifecycle; Windows are components too, so multi-window apps and dialogs are
-just conditional rendering. Styling is left to the user — Rocks provides the
-primitives: `Window`, `Box`, `Text`, `Pressable`.
+*call* to the kind (`@rock Text("hi")`), children as positional arguments,
+props as keyword arguments; state is created with the `@use` macro as a
+`Ref` or `Observable` (Observables.jl) — setting an Observable re-renders,
+`@use` also subscribes to shared/global observables and derived `map`
+sub-states; other hooks (useEffect, useMemo, useInterval, ...) track
+component lifecycle; Windows are components too, so multi-window apps and
+dialogs are just conditional rendering. Styling is left to the user — Rocks
+provides the primitives: `Window`, `Box`, `Text`, `Pressable`.
 
 ## Architecture
 
@@ -19,7 +22,7 @@ primitives: `Window`, `Box`, `Text`, `Pressable`.
 src/
 ├── Rocks.jl       # module, exports, includes
 ├── element.jl     # Element type, @rock macro, host kind singletons
-├── hooks.jl       # useState/useEffect/useRef/useMemo/..., timers
+├── hooks.jl       # @use (Ref/Observable state), useEffect/useMemo/..., timers
 ├── fiber.jl       # Fiber struct + reconciler (headless-testable)
 ├── layout.jl      # measure/place passes (headless-testable)
 ├── backend.jl     # SDL2 backend: windows, textures, fonts, colors, drawing
@@ -28,7 +31,8 @@ src/
 └── components.jl  # Row/Column convenience components
 ```
 
-Render cycle: SDL events → setState marks the app dirty → re-render the tree
+Render cycle: SDL events / Observable sets → mark the app dirty → re-render
+the tree
 (component functions re-run, fibers reconciled in place) → run pending
 effects → measure/place layout → mark all windows for drawing. Drawing is
 event-driven, not a timer loop: windows carry `needs_draw`/`needs_layout`

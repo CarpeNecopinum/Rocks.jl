@@ -31,22 +31,22 @@ function Dialog(; on_confirm = () -> nothing, on_cancel = () -> nothing)
 end
 
 function App()
-    open, set_open = useState(false)
-    deleted, set_deleted = useState(false)
+    open = @use Observable(false)
+    deleted = @use Observable(false)
     @rock Window(
-        @rock Text(deleted ? "The rocks are gone." : "All your rocks are safe."; size = 20),
+        @rock Text(deleted[] ? "The rocks are gone." : "All your rocks are safe."; size = 20),
         @rock Pressable(
             @rock Text("Delete rocks...");
-            on_press = () -> set_open(true),
+            on_press = () -> open[] = true,
             background = (0.20, 0.45, 0.95),
             hover_background = (0.25, 0.52, 1.00),
             pressed_background = (0.16, 0.38, 0.82),
             padding = 12, align = :center);
         title = "Dialogs", width = 360, height = 160,
         padding = 24, gap = 20,
-        open && @rock Dialog(;
-            on_confirm = () -> (set_open(false); set_deleted(true)),
-            on_cancel = () -> set_open(false)))
+        open[] && @rock Dialog(;
+            on_confirm = () -> (open[] = false; deleted[] = true),
+            on_cancel = () -> open[] = false))
 end
 
 render(App)

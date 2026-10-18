@@ -6,19 +6,21 @@ A React(Native)-style GUI framework for Julia built on SDL2
 
 Components are plain Julia functions — there is no separate component language.
 The [`@rock`](@ref) macro plays the role of React's (usually JSX-hidden)
-`createElement` call: children are passed as positional varargs, props as
-keyword arguments.
+`createElement` call: children are passed as positional arguments of the
+call, props as keyword arguments. Hook functions track the lifecycle of a
+component between renders, and the [`@use`](@ref) macro creates state as a
+`Ref` or `Observable`.
 
 ```julia
 using Rocks
 
 function Counter()
-    count, set_count = useState(0)
+    count = @use Observable(0)
     @rock Window(
         @rock Text("Count: ", count; size = 28),
         @rock Pressable(
             @rock Text("Increment");
-            on_press = () -> set_count(c -> c + 1));
+            on_press = () -> count[] += 1);
         title = "Counter", width = 320, height = 200,
         padding = 20, gap = 16)
 end
@@ -39,6 +41,7 @@ module Rocks
 using SimpleDirectMediaLayer
 using SimpleDirectMediaLayer.LibSDL2
 using ColorTypes
+using Observables
 
 include("element.jl")
 include("hooks.jl")
@@ -49,10 +52,13 @@ include("events.jl")
 include("runtime.jl")
 include("components.jl")
 
-export @rock, render, quit!,
+export @rock, @use, render, quit!,
        Window, Box, Text, Pressable, Row, Column,
-       useState, useEffect, useRef, useMemo, useCallback,
+       useEffect, useMemo, useCallback,
        useInterval, useTimeout,
        set_default_font!, load_font
+
+import Observables: Observable
+export Observable
 
 end # module

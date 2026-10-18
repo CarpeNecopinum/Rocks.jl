@@ -34,36 +34,66 @@ end
 # Compare effect/memo dependencies.
 deps_equal(a, b) = a == b
 
-mutable struct StateHook
-    value::Any
-    setter::Any
+mutable struct UseHook
+    value::Any        # the Ref or Observable the expression created
+    subscription::Any # Observables.ObserverFunction for Observables, else nothing
+    last::Any         # last seen observable value, for change deduplication
 end
 
 """
-    useState(initial) -> (value, set_value)
+    @use expr
 
-State hook. Returns the current value and a setter. The setter accepts either
-a new value or an updater function `value -> new_value`. Setting an identical
-value (`===`) does not trigger a re-render.
+Evaluate `expr` on the first render of the component and return the result on
+that and every subsequent render. `expr` must create a `Ref` or an
+`Observable` (from Observables.jl, re-exported by Rocks).
+
+If the result is an `Observable`, the component re-renders whenever the
+observable is set — this replaces React-style `useState`:
 
 ```julia
-count, set_count = useState(0)
-set_count(1)
-set_count(c -> c + 1)
+function Counter()
+    count = @use Observable(0)
+    @rock Window(
+        @rock Text("Count: ", count[]),
+        @rock Pressable(
+            @rock Text("Increment");
+            on_press = () -> count[] += 1);
+        title = "Counter")
+end
 ```
+
+`Ref`s are silent, replacing React-style `useRef`: mutating `ref[]` does not
+re-render (call [`request_render`](@ref) to redraw manually).
+
+Because the observable itself is returned, state can also be shared and
+derived without extra libraries:
+
+* `@use someGlobalObservable` — subscribe to a global observable.
+* `@use observablePassedInAsProp` — subscribe to an observable owned by a
+  parent component.
+* `@use map(x -> x.sub, obs)` — derive a sub-state; the component only
+  re-renders when the mapped value actually changes.
+
+Like all hooks, `@use` must be called unconditionally at the top level of a
+component (React rules apply). The expression is evaluated exactly once, on
+the first render — later prop changes do not re-create the Ref/Observable.
 """
-function useState(initial = nothing)
-    hook, _ = use_hook(() -> begin
-        s = StateHook(initial, nothing)
-        s.setter = v -> begin
-            new = v isa Function ? v(s.value) : v
-            new === s.value && return nothing
-            s.value = new
-            request_render()
-        end
-        s
-    end)
-    return hook.value, hook.setter
+macro use(expr)
+    return quote
+        hook, _ = use_hook(() -> begin
+            value = $(esc(expr))
+            h = UseHook(value, nothing, value isa Observable ? value[] : nothing)
+            if value isa Observable
+                h.subscription = on(value) do new
+                    new === h.last && return # identical values do not re-render
+                    h.last = new
+                    request_render()
+                end
+            end
+            h
+        end)
+        hook.value
+    end
 end
 
 mutable struct EffectHook
@@ -135,23 +165,6 @@ function run_effects!()
             hook.run_pending = false
         end
     end
-end
-
-mutable struct RefHook
-    current::Any
-end
-
-"""
-    useRef(initial = nothing) -> ref
-
-Ref hook. Returns a mutable box with a `current` field that persists across
-renders. Mutating `ref.current` does not trigger a re-render — refs are for
-values that must survive re-renders without being rendered (counters, cached
-handles, previous values, ...).
-"""
-function useRef(initial = nothing)
-    hook, _ = use_hook(() -> RefHook(initial))
-    return hook
 end
 
 mutable struct MemoHook
@@ -233,7 +246,7 @@ Calls `f()` every `ms` milliseconds while the component is mounted. The
 interval is cancelled automatically on unmount.
 
 ```julia
-now, set_now = useState(Dates.now())
+now = @use Observable(Dates.now())
 useInterval(() -> set_now(Dates.now()), 1000)
 ```
 """
