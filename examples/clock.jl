@@ -22,11 +22,11 @@ function App()
 
     elapsed = max(0, (now - started) / Millisecond(1) ÷ 1000)
 
-    @rock(Window,
-        @rock(Text, Dates.format(now, "HH:MM:SS"); size = 48),
-        @rock(Text, "running for ", elapsed, "s"; size = 16, color = "#8899aa"),
-        @rock(Pressable,
-            @rock(Text, elapsed > 0 ? "Restart" : "Start");
+    @rock Window(
+        @rock Text(Dates.format(now, "HH:MM:SS"); size = 48),
+        @rock Text("running for ", elapsed, "s"; size = 16, color = "#8899aa"),
+        @rock Pressable(
+            @rock Text(elapsed > 0 ? "Restart" : "Start");
             on_press = () -> set_started(Dates.now()),
             background = (0.30, 0.30, 0.34),
             hover_background = (0.38, 0.38, 0.42),

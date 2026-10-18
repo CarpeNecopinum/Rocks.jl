@@ -107,7 +107,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
 
 @testset "Rocks" begin
     @testset "elements" begin
-        el = @rock(Box, @rock(Text, "a"), @rock(Text, "b"); direction = :row, gap = 8)
+        el = @rock Box(@rock Text("a"), @rock Text("b"); direction = :row, gap = 8)
         @test el.kind === Box
         @test el.props[:direction] === :row
         @test el.props[:gap] == 8
@@ -116,28 +116,29 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         @test el.children[1].kind === Text
 
         # string children are stringified, nothing/false are skipped
-        el = @rock(Text, "Count: ", 42, nothing, false && @rock(Text, "no"))
+        el = @rock Text("Count: ", 42, nothing, false && @rock Text("no"))
         @test el.children[1] == "Count: "
         @test el.children[2] == 42
 
         # keys are stored as props
-        el = @rock(Text, "x"; key = "k1", color = (1, 0, 0))
+        el = @rock Text("x"; key = "k1", color = (1, 0, 0))
         @test el.props[:key] == "k1"
 
-        # calling the component inside @rock produces a helpful error
-        function SecondWindow()
-            @rock(Window, @rock(Text, "second"); title = "Second")
-        end
-        broken_el = @rock(SecondWindow())
+        # an element whose kind is another element (e.g. from calling a
+        # component inside an element constructor by hand) errors with a hint
+        inner = @rock Window(@rock Text("second"); title = "Second")
+        broken_el = Element(inner, Rocks.props_dict(), Any[])
         @test_throws "but got an already-created Element. The element already " *
-                     "describes a `Window` — did you call a component inside " *
-                     "`@rock`" Rocks.create_fiber(broken_el, nothing)
+                     "describes a `Window`" Rocks.create_fiber(broken_el, nothing)
 
         # splatted props after the semicolon (`kwargs...` idiom)
         extra = (x = 7, y = 9)
-        el = @rock(Window, @rock(Text, "a"); title = "t", extra...)
+        el = @rock Window(@rock Text("a"); title = "t", extra...)
         @test el.props[:x] == 7 && el.props[:y] == 9 && el.props[:title] == "t"
         @test length(el.children) == 1 # the splat must not become children
+
+        # the old @rock(Kind, children...) syntax errors with guidance
+        @test_throws LoadError include_string(Main, "@rock(Text, \"hello\")")
     end
 
     @testset "components" begin
@@ -146,10 +147,10 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             calls[] += 1
             @test label == "hello"
             @test length(children) == 1
-            @rock(Box, children...)
+            @rock Box(children...)
         end
 
-        with_tree(@rock(Widget; label = "hello", children = [@rock(Text, "child")])) do root
+        with_tree(@rock Widget(@rock Text("child"); label = "hello")) do root
             @test calls[] == 1
             # the root fiber wraps the element tree of the component
             @test root.kind === Widget
@@ -165,7 +166,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             useEffect(() -> push!(log, "dep:$(count)"), (count,))
             ref = useRef(0)
             memo = useMemo(() -> count * 10, (count,))
-            @rock(Box, @rock(Text, "count: ", count, " memo: ", memo, " ref: ", ref.current))
+            @rock Box(@rock Text("count: ", count, " memo: ", memo, " ref: ", ref.current))
         end
 
         with_tree(App) do root
@@ -197,7 +198,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         log = String[]
         function App()
             useEffect(() -> () -> push!(log, "cleanup"), ())
-            @rock(Box)
+            @rock Box()
         end
         with_tree(App) do root
             @test isempty(log)
@@ -208,7 +209,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
     @testset "reconciler" begin
         function App()
             which, set_which = useState(:a)
-            @rock(Box, which === :a ? @rock(Text, "A") : @rock(Box, @rock(Text, "B")))
+            @rock Box(which === :a ? (@rock Text("A")) : (@rock Box(@rock Text("B"))))
         end
         with_tree(App) do root
             box = root.children[1]
@@ -224,7 +225,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         # growing and shrinking lists
         function List()
             n, set_n = useState(1)
-            @rock(Column, (@rock(Text, "item ", i) for i in 1:n)...)
+            @rock Column((@rock Text("item ", i) for i in 1:n)...)
         end
         with_tree(List) do root
             box = root.children[1].children[1] # Column -> Box
@@ -241,12 +242,12 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
 
     @testset "layout" begin
         function App()
-            @rock(Window,
-                @rock(Column,
-                    @rock(Text, "hello"; size = 16),
-                    @rock(Row,
-                        @rock(Pressable, @rock(Text, "A"); padding = 8),
-                        @rock(Pressable, @rock(Text, "B"); padding = 8);
+            @rock Window(
+                @rock Column(
+                    @rock Text("hello"; size = 16),
+                    @rock Row(
+                        @rock Pressable(@rock Text("A"); padding = 8),
+                        @rock Pressable(@rock Text("B"); padding = 8);
                         gap = 6);
                     gap = 4);
                 title = "layout", width = 400, height = 300,
@@ -290,7 +291,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             useTimeout(quit!, 250)
             useInterval(() -> (ticks[] += 1), 50)
             renders[] += 1
-            @rock(Window, @rock(Text, "ticks: ", ticks[]); title = "t", width = 200, height = 100)
+            @rock Window(@rock Text("ticks: ", ticks[]); title = "t", width = 200, height = 100)
         end
         t0 = time()
         render(App)
@@ -306,9 +307,9 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         hover_log = Ref(0)
         function App()
             n, set_n = useState(0)
-            @rock(Window,
-                @rock(Pressable,
-                    @rock(Text, "clicked ", n, " times");
+            @rock Window(
+                @rock Pressable(
+                    @rock Text("clicked ", n, " times");
                     on_press = () -> (clicks[] += 1; set_n(c -> c + 1)),
                     on_press_in = () -> (pressed_log[] += 1),
                     on_hover_in = () -> (hover_log[] += 1),
@@ -359,9 +360,9 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
 
     @testset "pressable styling" begin
         function App()
-            @rock(Window,
-                @rock(Pressable,
-                    @rock(Text, "btn");
+            @rock Window(
+                @rock Pressable(
+                    @rock Text("btn");
                     background = (0.2, 0.45, 0.95),
                     hover_background = (0.25, 0.52, 1.0),
                     pressed_background = (0.16, 0.38, 0.82),
@@ -389,16 +390,16 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
 
     @testset "multi-window" begin
         function Dialog(; children = Any[])
-            @rock(Window, @rock(Text, "dialog"); title = "Dialog", width = 250, height = 150)
+            @rock Window(@rock Text("dialog"); title = "Dialog", width = 250, height = 150)
         end
         function App()
             open, set_open = useState(false)
-            @rock(Column,
-                @rock(Window,
-                    @rock(Text, "main"),
-                    @rock(Pressable, @rock(Text, "toggle"); on_press = () -> set_open(o -> !o));
+            @rock Column(
+                @rock Window(
+                    @rock Text("main"),
+                    @rock Pressable(@rock Text("toggle"); on_press = () -> set_open(o -> !o));
                     title = "Main", width = 300, height = 200),
-                open && @rock(Dialog);
+                open && @rock Dialog();
                 padding = 0)
         end
         with_tree(App) do root
@@ -426,8 +427,8 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
 
     @testset "draw scheduling" begin
         function App()
-            @rock(Window,
-                @rock(Pressable, @rock(Text, "btn"); padding = 10);
+            @rock Window(
+                @rock Pressable(@rock Text("btn"); padding = 10);
                 title = "sched", width = 200, height = 100, resizable = true)
         end
         with_tree(App) do root
@@ -480,7 +481,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         Rocks.init_backend()
         try
             function window_fiber(; kwargs...)
-                el = @rock(Window, @rock(Text, "x"); title = "pos", width = 200, height = 100, kwargs...)
+                el = @rock Window(@rock Text("x"); title = "pos", width = 200, height = 100, kwargs...)
                 f = Rocks.create_fiber(el, nothing)
                 Rocks.perform_render!(f)
                 f
@@ -533,7 +534,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
     @testset "on_key" begin
         last_key = Ref("")
         function App()
-            @rock(Window, @rock(Text, "k"); title = "keys", on_key = k -> (last_key[] = k))
+            @rock Window(@rock Text("k"); title = "keys", on_key = k -> (last_key[] = k))
         end
         with_tree(App) do root
             windows = sync_windows!(root)

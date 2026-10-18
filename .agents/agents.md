@@ -6,8 +6,9 @@ kind: agents
 
 Rocks.jl is a React(Native)-style GUI framework in Julia built on SDL2
 (SimpleDirectMediaLayer.jl). Components are plain Julia functions; the
-`@rock` macro plays the role of React's `createElement` (children as
-positional varargs, props as keyword arguments); hooks track component
+`@rock` macro plays the role of React's `createElement` — it applies to a
+*call* to the kind (`@rock Text("hi"); size = 12`), children as positional
+arguments, props as keyword arguments; hooks track component
 lifecycle; Windows are components too, so multi-window apps and dialogs are
 just conditional rendering. Styling is left to the user — Rocks provides the
 primitives: `Window`, `Box`, `Text`, `Pressable`.
@@ -68,10 +69,13 @@ timer — an idle application draws nothing.
   Rocks`: users should `import Rocks: Text` (examples show the pattern);
   the entry point is named `render` for this reason, `Rocks.run` is a
   qualified alias.
-- Macro kwargs arrive wrapped in `Expr(:parameters, ...)` as the *first*
-  positional argument of `@rock` — the macro splits them in element.jl.
-  Only `name = value` items are props; any other expression after the `;`
-  (e.g. `open && @rock(SecondWindow)`) is a positional child.
+- `@rock` applies to a *call*: the macro receives `Expr(:call, kind, ...)`
+  whose args start with the `Expr(:parameters, ...)` kwargs block (when
+  present). Only `name = value` items and `splats...` are props; any other
+  expression (e.g. `open && @rock SecondWindow()`) is a positional child.
+  Spaced macros swallow commas: `@rock A(...), B(...)` inside a call arrives
+  as ONE macrocall with a tuple argument — the macro expands each tuple item
+  and `Element`'s constructor flattens tuple children.
 - Text fibers hold raw content children (no child fibers); string children
   of non-Text hosts become Text elements during reconciliation.
 - Effect cleanup must run on unmount; timers/effects are tied to fibers and

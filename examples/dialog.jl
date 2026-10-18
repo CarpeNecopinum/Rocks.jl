@@ -8,17 +8,17 @@ using Rocks
 import Rocks: Text
 
 function Dialog(; on_confirm = () -> nothing, on_cancel = () -> nothing)
-    @rock(Window,
-        @rock(Text, "Delete all rocks?"; size = 20),
-        @rock(Row,
-            @rock(Pressable,
-                @rock(Text, " Cancel ");
+    @rock Window(
+        @rock Text("Delete all rocks?"; size = 20),
+        @rock Row(
+            @rock Pressable(
+                @rock Text(" Cancel ");
                 on_press = on_cancel,
                 background = (0.30, 0.30, 0.34),
                 hover_background = (0.38, 0.38, 0.42),
                 padding = 10, align = :center),
-            @rock(Pressable,
-                @rock(Text, " Delete ");
+            @rock Pressable(
+                @rock Text(" Delete ");
                 on_press = on_confirm,
                 background = (0.75, 0.25, 0.25),
                 hover_background = (0.85, 0.32, 0.32),
@@ -33,10 +33,10 @@ end
 function App()
     open, set_open = useState(false)
     deleted, set_deleted = useState(false)
-    @rock(Window,
-        @rock(Text, deleted ? "The rocks are gone." : "All your rocks are safe."; size = 20),
-        @rock(Pressable,
-            @rock(Text, "Delete rocks...");
+    @rock Window(
+        @rock Text(deleted ? "The rocks are gone." : "All your rocks are safe."; size = 20),
+        @rock Pressable(
+            @rock Text("Delete rocks...");
             on_press = () -> set_open(true),
             background = (0.20, 0.45, 0.95),
             hover_background = (0.25, 0.52, 1.00),
@@ -44,7 +44,7 @@ function App()
             padding = 12, align = :center);
         title = "Dialogs", width = 360, height = 160,
         padding = 24, gap = 20,
-        open && @rock(Dialog;
+        open && @rock Dialog(;
             on_confirm = () -> (set_open(false); set_deleted(true)),
             on_cancel = () -> set_open(false)))
 end

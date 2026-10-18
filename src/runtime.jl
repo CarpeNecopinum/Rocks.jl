@@ -70,7 +70,7 @@ called). `app` is either
 
   render(App)
   render() do
-      @rock(Window, @rock(Text, "Hello"))
+      @rock Window(@rock Text("Hello"))
   end
   ```
 
@@ -78,7 +78,7 @@ called). `app` is either
   inside it still re-run on state updates):
 
   ```julia
-  render(@rock(Window, @rock(Text, "Hello")))
+  render(@rock Window(@rock Text("Hello")))
   ```
 
 The render loop: block until an event arrives or a timer is due → dispatch

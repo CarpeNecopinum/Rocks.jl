@@ -14,16 +14,16 @@ using Rocks
 
 function Counter()
     count, set_count = useState(0)
-    @rock(Window,
-        @rock(Text, "Count: ", count; size = 28),
-        @rock(Pressable,
-            @rock(Text, "Increment");
+    @rock Window(
+        @rock Text("Count: ", count; size = 28),
+        @rock Pressable(
+            @rock Text("Increment");
             on_press = () -> set_count(c -> c + 1));
         title = "Counter", width = 320, height = 200,
         padding = 20, gap = 16)
 end
 
-run(Counter)
+render(Counter)
 ```
 
 Windows are components like everything else: rendering a tree with several

@@ -67,7 +67,7 @@ const Box = _BoxKind()
 
 Host element kind for text. The content is given as the children of the
 element and is stringified and concatenated, so values can be interpolated
-directly: `@rock(Text, "Count: ", count)`. Multi-line text is written with
+directly: `@rock Text("Count: ", count)`. Multi-line text is written with
 `"\\n"` line breaks.
 
 Props: `size` (font size in px, default 16), `color`, `font` (path to a TTF
@@ -98,6 +98,20 @@ const _PRESSABLE = Pressable
 
 is_host(kind) = kind isa HostKind
 
+# Flatten tuple/vector children (nested `@rock` calls in one invocation
+# arrive as tuples, because spaced macros swallow commas) so an Element's
+# children are always a flat list.
+function _flatten_children!(v, c)
+    if c isa Union{Tuple,Vector}
+        for sub in c
+            _flatten_children!(v, sub)
+        end
+    else
+        push!(v, c)
+    end
+    return v
+end
+
 """
     Element(kind, props, children)
 
@@ -108,23 +122,32 @@ struct Element
     kind::Any
     props::Dict{Symbol,Any}
     children::Vector{Any}
+    function Element(kind, props, children)
+        v = Any[]
+        for c in children
+            _flatten_children!(v, c)
+        end
+        new(kind, props, v)
+    end
 end
 
 props_dict(; kwargs...) = Dict{Symbol,Any}(kwargs)
 
 """
-    @rock(kind, children...; props...)
+    @rock Kind(children...; props...)
+    @rock Kind()
 
-Create an element. This is Rocks' equivalent of React's `createElement`
-(normally hidden behind JSX): `kind` is either a host element kind
-([`Window`](@ref), [`Box`](@ref), [`Text`](@ref), [`Pressable`](@ref)) or a
-component function, children are passed as positional varargs, and props as
-keyword arguments.
+Create an element by applying `@rock` to a call to the kind: children are
+the positional arguments of the call, props the keyword arguments. `kind`
+is either a host element kind ([`Window`](@ref), [`Box`](@ref),
+[`Text`](@ref), [`Pressable`](@ref)) or a component function.
 
 ```julia
-@rock(Box,
-    @rock(Text, "Hello, ", name),
-    @rock(Pressable, @rock(Text, "Press me"); on_press = () -> println("hi"));
+@rock Window(
+    @rock Text("Hello, ", name),
+    @rock Pressable(
+        @rock Text("Press me");
+        on_press = () -> println("hi"));
     direction = :row, padding = 8)
 ```
 
@@ -132,26 +155,45 @@ Children may also be written after the semicolon, intermixed with props —
 which makes trailing conditional rendering read naturally:
 
 ```julia
-@rock(Window,
-    @rock(Text, "Main window");
+@rock Window(
+    @rock Text("Main window");
     title = "Main", width = 340,
-    open && @rock(SecondWindow))
+    open && @rock SecondWindow())
 ```
 
 Strings, numbers and other values used as children are stringified and
 concatenated (they become text). `nothing` and `false` children are skipped,
-which makes conditional rendering (`cond && @rock(...)`) work like in JSX.
+which makes conditional rendering (`cond && @rock Kind(...)`) work like in
+JSX.
 """
-macro rock(args...)
+macro rock(call)
+    if call isa Expr && call.head === :tuple
+        # Spaced macros swallow commas: `@rock A(...), B(...)` arrives as the
+        # tuple `(A(...), B(...))`. Calls become their own elements; other
+        # expressions (macrocalls, conditionals like `open && @rock B()`) are
+        # passed through as child expressions. The resulting tuple is
+        # flattened into the parent's children.
+        items = Any[
+            item isa Expr && item.head === :call ?
+            Expr(:macrocall, Symbol("@rock"), __source__, item) : item
+            for item in call.args
+        ]
+        return Expr(:tuple, esc.(items)...)
+    end
+    if !(call isa Expr && call.head === :call)
+        # `@rock Kind` — an element with no children and no props
+        return quote
+            Element($(esc(call)), props_dict(), Any[])
+        end
+    end
+    kind = call.args[1]
     prop_kw = Any[]
-    pos = Any[]
-    trailing = Any[] # non-assignment expressions after `;` are children too
-    for a in args
+    pos = Any[]       # positional children (before the semicolon)
+    trailing = Any[]  # non-assignment expressions after the semicolon
+    for a in call.args[2:end]
         if a isa Expr && a.head === :parameters
-            # `@rock(kind, children...; props...)` — the post-`;` expressions
-            # arrive wrapped in an Expr(:parameters, ...) as the first
-            # argument. `name = value` items and `splats...` are props;
-            # everything else (e.g. `open && @rock(SecondWindow)`) is a child.
+            # children may also be written after the `;`, intermixed with
+            # props; `name = value` items and `splats...` are props
             for kw in a.args
                 if kw isa Expr && (kw.head === :kw || (kw.head === :(=) && kw.args[1] isa Symbol) ||
                                    kw.head === :...)
@@ -163,56 +205,53 @@ macro rock(args...)
         elseif a isa Expr && a.head === :kw
             push!(prop_kw, a)
         elseif a isa Expr && a.head === :(=) && a.args[1] isa Symbol
-            # Spaced form: `@rock kind x = 1`
             push!(prop_kw, Expr(:kw, a.args[1], a.args[2]))
         else
             push!(pos, a)
         end
     end
-    isempty(pos) && error("@rock needs a kind: a host element kind (Window, Box, Text, Pressable) or a component function")
-    kind = popfirst!(pos)
     children = [esc(c) for c in [pos..., trailing...]]
     # Direct props become keyword arguments of props_dict; splats go into the
     # keyword slot too, so both NamedTuples and Pair iterators splat as props.
     prop_args = Any[Expr(:kw, kw.args[1], esc(kw.args[2])) for kw in prop_kw if !(kw isa Expr && kw.head === :...)]
     prop_splats = Any[Expr(:..., esc(kw.args[1])) for kw in prop_kw if kw isa Expr && kw.head === :...]
-    call = Expr(:call, :props_dict)
-    # In a call AST the keyword-parameters expression comes before the args.
-    isempty(prop_splats) || push!(call.args, Expr(:parameters, prop_splats...))
-    append!(call.args, prop_args)
+    props_call = Expr(:call, :props_dict)
+    isempty(prop_splats) || push!(props_call.args, Expr(:parameters, prop_splats...))
+    append!(props_call.args, prop_args)
     return quote
-        Element($(esc(kind)), $call, Any[$(children...)])
+        Element($(esc(kind)), $props_call, Any[$(children...)])
     end
 end
 
-# Normalize a component's return value into a flat Vector{Any} of elements.
+# Migration guard for the old `@rock(Kind, children...; props...)` syntax.
+macro rock(kind, args...)
+    return error(
+        "the @rock macro applies to a call: write " *
+        "`@rock Kind(children...; props...)` instead of " *
+        "`@rock(Kind, children...; props...)`",
+    )
+end
+
+# Normalize a component's return value (or a list of raw children) into
+# elements: strings/values become text, `nothing`/`false` are skipped
+# (conditional rendering idioms), tuples/vectors of elements are flattened.
+function push_children!(v, e)
+    if e isa Element
+        push!(v, e)
+    elseif e isa AbstractString
+        push!(v, Element(_TEXT, Dict{Symbol,Any}(), Any[String(e)]))
+    elseif e isa Union{Tuple,Vector}
+        for sub in e
+            push_children!(v, sub)
+        end
+    elseif e === nothing || e isa Bool
+        # skipped
+    else
+        push!(v, Element(_TEXT, Dict{Symbol,Any}(), Any[string(e)]))
+    end
+    return v
+end
+
 function to_elements(out)
-    v = Any[]
-    _collect_elements!(v, out)
-    return v
-end
-
-function _collect_elements!(v, ::Nothing)
-    return v
-end
-
-function _collect_elements!(v, ::Bool)
-    return v # `cond && @rock(...)` idioms produce `false`; skip
-end
-
-function _collect_elements!(v, s::AbstractString)
-    push!(v, Element(_TEXT, Dict{Symbol,Any}(), Any[String(s)]))
-    return v
-end
-
-function _collect_elements!(v, e::Element)
-    push!(v, e)
-    return v
-end
-
-function _collect_elements!(v, xs::Union{Tuple,Vector})
-    for x in xs
-        _collect_elements!(v, x)
-    end
-    return v
+    return push_children!(Any[], out)
 end

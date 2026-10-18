@@ -140,19 +140,10 @@ Reconcile `fiber.children` against a fresh list of elements: update matching
 fibers in place, create missing ones, unmount removed ones.
 """
 function reconcile_children!(fiber, elements_raw)
-    # Normalize children: `nothing`/`false` are skipped (conditional
-    # rendering idioms), raw strings/values become text (like JSX children),
-    # and only Elements become fibers.
-    elements = Any[]
-    for e in elements_raw
-        if e isa Element
-            push!(elements, e)
-        elseif e isa AbstractString
-            push!(elements, Element(_TEXT, Dict{Symbol,Any}(), Any[String(e)]))
-        elseif !(e isa Bool) && e !== nothing
-            push!(elements, Element(_TEXT, Dict{Symbol,Any}(), Any[string(e)]))
-        end
-    end
+    # Normalize children: strings/values become text, `nothing`/`false` are
+    # skipped, tuples/vectors of elements (e.g. from nested `@rock` calls in
+    # one invocation) are flattened. Only Elements become fibers.
+    elements = push_children!(Any[], elements_raw)
     old = fiber.children
     n = length(elements)
     for i in (n+1):length(old)

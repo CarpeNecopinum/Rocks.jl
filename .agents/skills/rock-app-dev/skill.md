@@ -25,15 +25,17 @@ element created with `@rock`:
 
 ```julia
 function Greeting(; name, children = Any[])
-    @rock(Column,
-        @rock(Text, "Hello, ", name, "!"),  # values are interpolated as text
+    @rock Column(
+        @rock Text("Hello, ", name, "!"),  # values are interpolated as text
         children...;
         gap = 8)
 end
 ```
 
-- Children are positional varargs of `@rock`, props are keyword arguments.
-- `nothing`/`false` children are skipped: `cond && @rock(...)` works like JSX.
+- `@rock` applies to a *call* to the kind: children are the positional
+  arguments, props the keyword arguments.
+- `nothing`/`false` children are skipped: `cond && @rock Kind(...)` works
+  like JSX.
 - Components re-run on every re-render; they must return the same hook order.
 
 ## Hooks
@@ -49,15 +51,15 @@ end
 
 ## Windows
 
-Windows are components: render `@rock(Window, children...; title, width,
+Windows are components: render `@rock Window(children...; title, width,
 height, resizable, background, position, display, x, y, on_key,
 on_text_input, on_close)` anywhere in the tree. Positioning: `position` is
 `:cascade` (default; centered + cascade offset per open window), `:centered`
 (exactly centered), `:manual` (exact `x`/`y`) or `:mouse` (top-left at the
 pointer); `display` picks the display for centered modes (`nothing` = the
 display the pointer is on); giving `x`/`y` without `position` implies
-`:manual`. Multiple windows = multi-window app; `open && @rock(Dialog)` opens
-a dialog. `quit!()` closes all windows.
+`:manual`. Multiple windows = multi-window app; `open && @rock Dialog()`
+opens a dialog. `quit!()` closes all windows.
 
 ## Built-in elements
 

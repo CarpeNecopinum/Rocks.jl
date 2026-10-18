@@ -8,7 +8,7 @@ Component that lays its children out horizontally. Equivalent to a
 [`Box`](@ref) with `direction = :row`.
 
 ```julia
-@rock(Row, @rock(Text, "left "), @rock(Text, "right"); gap = 8)
+@rock Row(@rock Text("left "), @rock Text("right"); gap = 8)
 ```
 """
 function Row(; children = Any[], kwargs...)
@@ -24,7 +24,7 @@ Component that lays its children out vertically. Equivalent to a
 [`Box`](@ref) with `direction = :column` (the default).
 
 ```julia
-@rock(Column, @rock(Text, "top"), @rock(Text, "bottom"); gap = 12)
+@rock Column(@rock Text("top"), @rock Text("bottom"); gap = 12)
 ```
 """
 function Column(; children = Any[], kwargs...)

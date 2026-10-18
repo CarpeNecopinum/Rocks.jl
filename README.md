@@ -17,10 +17,10 @@ import Rocks: Text # disambiguate Rocks.Text from Base.Text
 
 function Counter()
     count, set_count = useState(0)
-    @rock(Window,
-        @rock(Text, "Count: ", count; size = 32),
-        @rock(Pressable,
-            @rock(Text, "Increment");
+    @rock Window(
+        @rock Text("Count: ", count; size = 32),
+        @rock Pressable(
+            @rock Text("Increment");
             on_press = () -> set_count(c -> c + 1),
             background = (0.20, 0.45, 0.95),
             padding = 12, align = :center);
@@ -51,13 +51,13 @@ or a string which becomes text):
 
 ```julia
 function Greeting(; name, children = Any[])
-    @rock(Column,
-        @rock(Text, "Hello, ", name, "!"),
+    @rock Column(
+        @rock Text("Hello, ", name, "!"),
         children...;
         gap = 8)
 end
 
-@rock(Greeting; name = "World")
+@rock Greeting(; name = "World")
 ```
 
 Components re-run on every re-render of their subtree. `children` is passed
@@ -66,27 +66,29 @@ need to declare it.
 
 ### Elements and the @rock macro
 
-`@rock(kind, children...; props...)` creates an element:
+`@rock Kind(children...; props...)` creates an element — `@rock` applies to
+a *call* to the kind, children are the positional arguments, props the
+keyword arguments:
 
 ```julia
-@rock(Box,
-    @rock(Text, "Hello, ", name),              # values are interpolated as text
-    @rock(Pressable, @rock(Text, "Press me"); on_press = () -> println("hi"));
-    direction = :row, padding = 8)             # props as keyword arguments
+@rock Box(
+    @rock Text("Hello, ", name),                    # values are interpolated as text
+    @rock Pressable(@rock Text("Press me"); on_press = () -> println("hi"));
+    direction = :row, padding = 8)                  # props as keyword arguments
 ```
 
 `kind` is either one of the built-in host elements (`Window`, `Box`, `Text`,
 `Pressable`) or a component function. Strings, numbers and other values used
 as children are stringified and concatenated (they become text), and
-`nothing`/`false` children are skipped — so `cond && @rock(...)` conditional
-rendering works like in JSX. Children may also be written after the
-semicolon, intermixed with props:
+`nothing`/`false` children are skipped — so `cond && @rock Kind(...)`
+conditional rendering works like in JSX. Children may also be written after
+the semicolon, intermixed with props:
 
 ```julia
-@rock(Window,
-    @rock(Text, "Main window");
+@rock Window(
+    @rock Text("Main window");
     title = "Main", width = 340,
-    open && @rock(SecondWindow))
+    open && @rock SecondWindow())
 ```
 
 ### Hooks
@@ -121,14 +123,14 @@ rendering:
 ```julia
 function App()
     open, set_open = useState(false)
-    @rock(Window,
-        @rock(Pressable, @rock(Text, "Open dialog"); on_press = () -> set_open(true));
+    @rock Window(
+        @rock Pressable(@rock Text("Open dialog"); on_press = () -> set_open(true));
         title = "Main", width = 400, height = 300,
-        open && @rock(Dialog))
+        open && @rock Dialog())
 end
 
 function Dialog()
-    @rock(Window, @rock(Text, "I am a dialog"); title = "Dialog", width = 300, height = 150)
+    @rock Window(@rock Text("I am a dialog"); title = "Dialog", width = 300, height = 150)
 end
 ```
 
