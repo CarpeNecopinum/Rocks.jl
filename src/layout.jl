@@ -66,7 +66,15 @@ function measure!(fiber)
         w, h = cross, main
     end
     for child in fiber.children
-        is_absolute_child(child) && measure!(child)
+        is_absolute_child(child) || continue
+        if get(child.props, :fill, false)
+            # fill children measure their subtree, then stretch to the
+            # parent's current size (windows use the real OS size)
+            measure!(child)
+            child.measured = (w, h)
+        else
+            measure!(child)
+        end
     end
     pw = get(fiber.props, :width, nothing)
     ph = get(fiber.props, :height, nothing)
@@ -80,15 +88,28 @@ function measure_box(fiber)
     p = padding_of(fiber)
     dir = Symbol(get(fiber.props, :direction, :column))
     gap = float(get(fiber.props, :gap, 0))
+    kids = collect(flow_children(fiber))
     main, cross = 2p, 0.0
-    count = 0
-    for child in flow_children(fiber)
+    # Regular children first: they determine the cross size that `fill`
+    # children stretch across.
+    for child in kids
+        get(child.props, :fill, false) && continue
         cw, ch = measure!(child)
         main += dir === :column ? ch : cw
         cross = max(cross, dir === :column ? cw : ch)
-        count += 1
     end
-    main += gap * max(count - 1, 0)
+    for child in kids
+        get(child.props, :fill, false) || continue
+        cw, ch = measure!(child)
+        if dir === :column
+            child.measured = (cross, ch)
+            main += ch
+        else
+            child.measured = (cw, cross)
+            main += cw
+        end
+    end
+    main += gap * max(length(kids) - 1, 0)
     return dir === :column ? (cross + 2p, main) : (main, cross + 2p)
 end
 
@@ -263,11 +284,31 @@ function place_flow!(fiber, dir, gap, p, align, x, y, w, h)
             cx += child.measured[1] + gap
         end
     end
-    # Absolutely positioned children are placed manually relative to the
-    # parent's top-left corner.
+    # Absolutely positioned children are placed relative to the parent's
+    # top-left corner, honoring overlay anchors (`align` prop): `:top_left`
+    # (default), `:top_right`, `:bottom_left`, `:bottom_right` place the child
+    # at that corner of the parent with `x`/`y` as inward offsets (negative
+    # values push it outward past the edge), `:center` centers it in the
+    # parent and `:bottom` bottom-anchors it centered horizontally.
     for child in fiber.children
         is_absolute_child(child) || continue
-        place!(child, x + float(get(child.props, :x, 0)), y + float(get(child.props, :y, 0)))
+        cw, ch = child.measured
+        calign = Symbol(get(child.props, :align, :top_left))
+        dx = float(get(child.props, :x, 0))
+        dy = float(get(child.props, :y, 0))
+        if calign === :center
+            place!(child, x + (w - cw) / 2, y + (h - ch) / 2)
+        elseif calign === :bottom
+            place!(child, x + (w - cw) / 2, y + h - ch - dy)
+        elseif calign === :top_right
+            place!(child, x + (w - cw) - dx, y + dy)
+        elseif calign === :bottom_left
+            place!(child, x + dx, y + (h - ch) - dy)
+        elseif calign === :bottom_right
+            place!(child, x + (w - cw) - dx, y + (h - ch) - dy)
+        else
+            place!(child, x + dx, y + dy)
+        end
     end
     return nothing
 end

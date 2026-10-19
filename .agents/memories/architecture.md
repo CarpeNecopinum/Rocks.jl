@@ -37,3 +37,14 @@ Key architecture decisions of Rocks.jl (React-style GUI framework on SDL2):
   `SDL_VIDEODRIVER=dummy` (verified: dummy, `offscreen` and x11/Xvfb produce
   identical pixels; an xvfb layer was built and then dropped as
   unnecessary). Headless runs use `render(app; frames, screenshot)`.
+- **Material3**: a submodule (`src/Material3/`) with M3-themed components
+  built on `Rocks.Mechanics` (vanilla, appearance-prop-driven controls in
+  `src/mechanics.jl`). Theming via `createContext` with a non-mutable
+  `Theme` (color roles + typescale + shapescale); components `@use` their
+  state and theme Observables so toggles and theme switches re-render.
+  Rounded shapes use `SDL_RenderGeometry` (`fill_round_rect`/`ring_round_rect`);
+  `Box`/`Pressable` take a `radius` prop. Overlays use absolute children with
+  `fill`/corner anchors; text fields use a focus concept in events.jl.
+- **@rock macro**: nested `;` groups parse as nested `parameters` blocks and
+  are flattened; positional `...` splats are children, parameter-group splats
+  are props; the `:kw` case in the argument visit must not be dropped.

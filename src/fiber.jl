@@ -188,6 +188,8 @@ hook order and release backend resources.
 function unmount!(fiber)
     fiber.mounted || return
     fiber.mounted = false
+    # A focused fiber inside the unmounted subtree must release focus.
+    FOCUSED[] !== nothing && inside_subtree(FOCUSED[], fiber) && (FOCUSED[] = nothing)
     for child in fiber.children
         unmount!(child)
     end

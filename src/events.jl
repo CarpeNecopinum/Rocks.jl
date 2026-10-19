@@ -155,6 +155,79 @@ end
 
 inside((rx, ry, rw, rh), x, y) = rx <= x < rx + rw && ry <= y < ry + rh
 
+# ---- keyboard focus -------------------------------------------------------
+
+# The fiber keyboard events are dispatched to (the deepest one under the last
+# press carrying `on_key`/`on_text_input` props); `nothing` means the window.
+const FOCUSED = Ref{Union{Nothing,Fiber}}(nothing)
+
+"""
+    focus!(fiber)
+
+Give keyboard focus to a fiber (its `on_key`/`on_text_input` props receive
+keyboard events until focus moves). Focus normally follows the press and is
+rarely set manually.
+"""
+function focus!(fiber)
+    FOCUSED[] === fiber && return
+    FOCUSED[] = fiber
+    request_render()
+    return nothing
+end
+
+"""
+    unfocus!()
+
+Clear keyboard focus (events return to the window).
+"""
+function unfocus!()
+    FOCUSED[] === nothing && return
+    FOCUSED[] = nothing
+    request_render()
+    return nothing
+end
+
+# Does `fiber` live inside `ancestor`'s subtree?
+function inside_subtree(fiber, ancestor)
+    f = fiber
+    while f !== nothing
+        f === ancestor && return true
+        f = f.parent
+    end
+    return false
+end
+
+# The nearest fiber (or ancestor) handling keyboard events.
+function find_focusable(fiber)
+    f = fiber
+    while f !== nothing
+        (haskey(f.props, :on_key) || haskey(f.props, :on_text_input)) && return f
+        f = f.parent
+    end
+    return nothing
+end
+
+# The fiber keyboard events go to: the focused fiber when it is mounted and
+# belongs to the event's window, the window otherwise.
+function keyboard_target(fiber)
+    focused = FOCUSED[]
+    focused === nothing && return fiber
+    focused.mounted && inside_subtree(focused, fiber) && return focused
+    return fiber
+end
+
+"""
+    has_focus() -> Bool
+
+Whether the fiber currently being rendered holds keyboard focus. Components
+use it to draw focus indicators and carets.
+"""
+function has_focus()
+    CURRENT_FIBER[] !== nothing || return false
+    FOCUSED[] !== nothing || return false
+    return inside_subtree(FOCUSED[], CURRENT_FIBER[])
+end
+
 function update_cursor()
     if HAND_CURSOR[] == C_NULL
         HAND_CURSOR[] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_HAND)
@@ -224,6 +297,14 @@ function dispatch_event!(event::SDL_Event)
         mx, my = event.button.x, event.button.y
         target = hit_test(fiber, mx, my)
 
+        # Focus follows the press: the nearest fiber handling keyboard events
+        # gets them (the window when nothing in the tree handles them).
+        focusable = find_focusable(target)
+        if focusable !== FOCUSED[]
+            FOCUSED[] = focusable
+            request_render()
+        end
+
         # start a drag when the press lands on a Split handle or a Slider
         drag = find_draggable(target, mx, my)
         if drag !== nothing
@@ -270,13 +351,15 @@ function dispatch_event!(event::SDL_Event)
     elseif ty == SDL_KEYDOWN
         fiber = get(WINDOW_BY_ID, event.key.windowID, nothing)
         fiber === nothing && return
+        target = keyboard_target(fiber)
         key = unsafe_string(SDL_GetKeyName(event.key.keysym.sym))
-        callback(fiber.props, :on_key, key)
+        callback(target.props, :on_key, key)
     elseif ty == SDL_KEYUP
         fiber = get(WINDOW_BY_ID, event.key.windowID, nothing)
         fiber === nothing && return
+        target = keyboard_target(fiber)
         key = unsafe_string(SDL_GetKeyName(event.key.keysym.sym))
-        callback(fiber.props, :on_key_up, key)
+        callback(target.props, :on_key_up, key)
     elseif ty == SDL_TEXTINPUT
         fiber = get(WINDOW_BY_ID, event.text.windowID, nothing)
         fiber === nothing && return
@@ -286,7 +369,8 @@ function dispatch_event!(event::SDL_Event)
             b == 0 && break
             push!(chars, UInt8(b & 0xff))
         end
-        callback(fiber.props, :on_text_input, String(chars))
+        target = keyboard_target(fiber)
+        callback(target.props, :on_text_input, String(chars))
     end
     return nothing
 end

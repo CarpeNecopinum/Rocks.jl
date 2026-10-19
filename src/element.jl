@@ -255,25 +255,29 @@ macro rock(call)
     prop_kw = Any[]
     pos = Any[]       # positional children (before the semicolon)
     trailing = Any[]  # non-assignment expressions after the semicolon
-    for a in call.args[2:end]
+    # Visit the call's arguments, flattening nested `;` parameter groups
+    # (`f(a; k = v; k2 = w)` parses as nested `parameters` blocks). Items
+    # inside a parameters block come after the semicolon, so they are
+    # trailing children; top-level items are positional.
+    function visit_arg(a, where)
         if a isa Expr && a.head === :parameters
-            # children may also be written after the `;`, intermixed with
-            # props; `name = value` items and `splats...` are props
             for kw in a.args
-                if kw isa Expr && (kw.head === :kw || (kw.head === :(=) && kw.args[1] isa Symbol) ||
-                                   kw.head === :...)
-                    push!(prop_kw, kw)
-                else
-                    push!(trailing, kw)
-                end
+                visit_arg(kw, :trailing)
             end
         elseif a isa Expr && a.head === :kw
             push!(prop_kw, a)
+        elseif a isa Expr && a.head === :...
+            # splats inside a `;` group are props; positional splats are
+            # children
+            push!(where === :trailing ? prop_kw : pos, a)
         elseif a isa Expr && a.head === :(=) && a.args[1] isa Symbol
             push!(prop_kw, Expr(:kw, a.args[1], a.args[2]))
         else
-            push!(pos, a)
+            push!(where === :trailing ? trailing : pos, a)
         end
+    end
+    for a in call.args[2:end]
+        visit_arg(a, :pos)
     end
     children = [esc(c) for c in [pos..., trailing...]]
     # Direct props become keyword arguments of props_dict; splats go into the
@@ -322,8 +326,11 @@ function to_elements(out)
 end
 
 # Flatten tuple/vector children (spaced @rock macrocalls swallow commas, so
-# arrays of elements arrive as nested tuples).
+# arrays of elements arrive as nested tuples). Single elements and `nothing`
+# are accepted too.
 function flat_children(children)
+    children isa Element && return Any[children]
+    children === nothing && return Any[]
     out = Any[]
     for c in children
         if c isa Union{Tuple,Vector}

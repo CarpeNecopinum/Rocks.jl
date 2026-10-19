@@ -79,6 +79,25 @@ function png_pixel(path, x, y)
     return px
 end
 
+# The first fiber in a subtree whose kind matches, and all of them.
+function find_kind(f, kind)
+    f.kind === kind && return f
+    for c in f.children
+        found = find_kind(c, kind)
+        found !== nothing && return found
+    end
+    return nothing
+end
+
+function collect_kind(f, kind)
+    out = Rocks.Fiber[]
+    f.kind === kind && push!(out, f)
+    for c in f.children
+        append!(out, collect_kind(c, kind))
+    end
+    return out
+end
+
 function push_mouse!(fiber, type, x, y; button = 1)
     window = fiber
     while !Rocks.is_window(window)
@@ -957,6 +976,238 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             @assert SDL_PushEvent(p) >= 0
             drain_events!()
             @test last_key[] == "Escape"
+        end
+    end
+
+    # ---- Material3 ------------------------------------------------------------
+
+    @testset "material3" begin
+        M3 = Rocks.Material3
+
+        @testset "theme" begin
+            # the default theme is the baseline light scheme
+            @test M3.ThemeContext.default == M3.light_theme()
+            @test M3.light_theme().primary == "#6750A4"
+            @test M3.dark_theme().primary == "#D0BCFF"
+            @test M3.light_theme() != M3.dark_theme()
+            # the theme struct is immutable
+            @test !ismutabletype(typeof(M3.light_theme()))
+            @test M3.light_theme().typescale.body_large isa Int
+            @test M3.light_theme().shapes.full > 100
+        end
+
+        @testset "theme context" begin
+            dark = Observable(M3.dark_theme())
+            function ThemedApp()
+                @rock M3.ThemeContext.provider(
+                    @rock M3.Button("Filled");
+                    value = dark)
+            end
+            # theme switches re-render the components with the new palette
+            with_tree(ThemedApp) do root
+                button = find_kind(root, Mechanics.Button)
+                pressable = find_kind(root, Pressable)
+                @test pressable.props[:background] == M3.dark_theme().primary
+                dark[] = M3.light_theme()
+                Rocks.perform_render!(root)
+                @test find_kind(root, Pressable).props[:background] ==
+                      M3.light_theme().primary
+            end
+        end
+
+        @testset "variants" begin
+            function BtnApp()
+                @rock M3.Button("Save"; variant = :filled)
+            end
+            with_tree(BtnApp) do root
+                pressable = find_kind(root, Pressable)
+                @test pressable.props[:background] == M3.light_theme().primary
+                @test pressable.props[:radius] == M3.light_theme().shapes.full
+                @test pressable.props[:height] == 40
+            end
+            function OutlinedApp()
+                @rock M3.Button("Save"; variant = :outlined)
+            end
+            with_tree(OutlinedApp) do root
+                pressable = find_kind(root, Pressable)
+                @test pressable.props[:background] === nothing
+                @test pressable.props[:border_color] == M3.light_theme().outline
+                @test pressable.props[:border_width] == 1
+            end
+            # a disabled filled button uses the M3 disabled container
+            function DisabledApp()
+                @rock M3.Button("Off"; disabled = true)
+            end
+            with_tree(DisabledApp) do root
+                pressable = find_kind(root, Pressable)
+                rgba = pressable.props[:background]
+                @test rgba[4] == 0x1f # on-surface at 12%
+            end
+        end
+
+        @testset "checkbox and switch" begin
+            checked = Observable(true)
+            changed = Ref(0)
+            function CbApp()
+                @rock M3.Checkbox(checked = checked, label = "grid";
+                                  on_change = () -> (changed[] += 1))
+            end
+            with_tree(CbApp) do root
+                pressables = collect_kind(root, Pressable)
+                @test length(pressables) >= 1
+                pressables[1].props[:on_press]()
+                @test checked[] == false
+                @test changed[] == 1
+                pressables[1].props[:on_press]()
+                @test checked[] == true
+            end
+
+            on = Observable(false)
+            function SwApp()
+                @rock M3.Switch(on = on)
+            end
+            with_tree(SwApp) do root
+                pressable = find_kind(root, Pressable)
+                pressable.props[:on_press]()
+                @test on[] == true
+            end
+        end
+
+        @testset "segmented" begin
+            selection = Observable(1)
+            function SegApp()
+                @rock M3.SegmentedButton(["Day", "Week"]; selection = selection)
+            end
+            with_tree(SegApp) do root
+                segments = collect_kind(root, Pressable)
+                @test length(segments) == 2
+                segments[2].props[:on_press]()
+                @test selection[] == 2
+            end
+
+            multi = Observable(Int[1])
+            function MultiApp()
+                @rock M3.SegmentedButton(["A", "B", "C"]; selection = multi, multiple = true)
+            end
+            with_tree(MultiApp) do root
+                segments = collect_kind(root, Pressable)
+                @test length(segments) == 3
+                segments[2].props[:on_press]()
+                @test multi[] == [1, 2]
+                segments[1].props[:on_press]()
+                @test multi[] == [2]
+            end
+        end
+
+        @testset "radio group" begin
+            selected = Observable(1)
+            function RadioApp()
+                @rock M3.RadioGroup(["One", "Two"]; selected = selected)
+            end
+            with_tree(RadioApp) do root
+                radios = collect_kind(root, Pressable)
+                @test length(radios) == 2
+                radios[2].props[:on_press]()
+                @test selected[] == 2
+            end
+        end
+
+        @testset "slider" begin
+            value = Observable(0.5)
+            function SliderApp()
+                @rock M3.Slider(value = value)
+            end
+            with_tree(SliderApp) do root
+                slider = find_kind(root, Slider)
+                @test slider.kind === Slider
+                @test slider.props[:thumb_width] == 4 # M3 handle gap
+                @test slider.props[:track_height] == 16
+                @test slider.props[:active_color] == M3.light_theme().primary
+            end
+        end
+
+        @testset "dialog overlay" begin
+            open = Observable(true)
+            function DlgApp()
+                @rock M3.Dialog(
+                    @rock Text("Delete this item?"; size = 16);
+                    open = open)
+            end
+            with_tree(DlgApp) do root
+                scrim = find_kind(root, Box)
+                @test scrim.props[:fill] == true      # covers the window
+                @test scrim.props[:position] === :absolute
+                card = scrim.children[1]
+                @test card.props[:align] === :center  # centered in the scrim
+                @test card.props[:width] == 320
+                # closing the dialog renders nothing
+                open[] = false
+                Rocks.perform_render!(root)
+                @test find_kind(root, Box) === nothing
+            end
+        end
+
+        @testset "list item" begin
+            function ListApp()
+                @rock M3.List(
+                    @rock M3.ListItem("First"; leading = "mail"),
+                    @rock M3.ListItem("Second"; supporting = "supporting"))
+            end
+            with_tree(ListApp) do root
+                # two rows (pressables) + two dividers below them
+                rows = collect_kind(root, Pressable)
+                @test length(rows) == 2
+                dividers = [f for f in collect_kind(root, Box) if
+                            get(f.props, :height, nothing) == 1]
+                @test length(dividers) == 2
+            end
+        end
+
+        @testset "text field" begin
+            text = Observable("")
+            function FieldApp()
+                @rock M3.TextField(text = text, label = "Name", variant = :filled)
+            end
+            with_tree(FieldApp) do root
+                fields = collect_kind(root, Pressable)
+                @test length(fields) >= 1
+                field = fields[1]
+                # typed characters land in the observable
+                field.props[:on_text_input]("Ada")
+                @test text[] == "Ada"
+                field.props[:on_key]("Backspace")
+                @test text[] == "Ad"
+                # the filled variant uses the theme's highest container
+                @test field.props[:background] == M3.light_theme().surface_container_highest
+            end
+        end
+
+        @testset "badge" begin
+            function BadgeApp()
+                @rock M3.Badge(3)
+            end
+            with_tree(BadgeApp) do root
+                marker = find_kind(root, Box)
+                @test marker.props[:background] == M3.light_theme().error
+            end
+        end
+
+        @testset "navigation" begin
+            selected = Observable(1)
+            function NavApp()
+                @rock M3.NavigationBar(
+                    destinations = [("Home", "home"), ("Favorite", "favorite")];
+                    selected = selected)
+            end
+            with_tree(NavApp) do root
+                bar = find_kind(root, Box)
+                @test bar.props[:height] == 80
+                @test bar.props[:fill] == true
+                destinations = collect_kind(bar, Pressable)
+                @test length(destinations) == 2
+                destinations[2].props[:on_press]()
+                @test selected[] == 2
+            end
         end
     end
 

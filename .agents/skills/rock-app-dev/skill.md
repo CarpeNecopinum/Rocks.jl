@@ -100,6 +100,32 @@ text, colors primary/secondary/success/error/warning/info, sizes),
 Styling is manual (React-Native style): sizes are pixels, colors are tuples
 (0-1 floats or 0-255 ints), hex strings or ColorTypes.
 
+## Material Design 3
+
+`Rocks.Material3` provides themed M3 components (Button, FAB, IconButton,
+SegmentedButton, Checkbox, Switch, RadioGroup, Slider, Chip, Badge, Snackbar,
+Card, Dialog, Divider, List/ListItem, Tooltip, NavigationBar/Rail/Drawer,
+Tabs, TopAppBar, TextField, LinearProgress). Theming via `createContext`:
+
+```julia
+import Rocks.Material3
+const M3 = Rocks.Material3
+theme = Observable(M3.light_theme())
+
+function App()
+    @rock M3.ThemeContext.provider(
+        @rock M3.Button("Hello");
+        value = theme)   # Observable{Theme} — theme switches re-render
+end
+```
+
+- Components read the active theme with `M3.theme()`; `M3.dark_theme()` /
+  `M3.light_theme()` are the baseline schemes; the `Theme` struct is
+  immutable (updates create new instances).
+- Icons are Unicode glyphs from `M3.ICONS` (extend the dict for more).
+- `Rocks.Mechanics` holds the vanilla, appearance-prop-driven controls the M3
+  components build on — use them for unstyled but complete behavior.
+
 ## Testing apps
 
 Headless (no display needed): set `ENV["SDL_VIDEODRIVER"] = "dummy"` before

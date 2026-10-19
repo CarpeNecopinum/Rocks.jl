@@ -266,6 +266,46 @@ burns CPU.
 Pointer events are dispatched to the deepest fiber under the pointer,
 bubbling up to the nearest `Pressable` ancestor, like DOM event targets.
 
+## Material Design 3
+
+`Rocks.Material3` is a submodule implementing much of the
+[Material Design 3](https://m3.material.io/components) specification on top of
+the primitives: buttons, FABs, icon buttons, segmented buttons, checkbox,
+switch, radio group, slider, chips (assist/filter/input/suggestion), badge,
+snackbar, cards, dialog, divider, list, tooltip, navigation bar/rail/drawer,
+tabs, top app bar, text fields and a linear progress indicator.
+
+Theming is provided through `createContext`: a non-mutable `Theme` (M3 color
+roles as hex strings, the type scale, the shape scale) supplied by
+`ThemeContext.provider`. Provide an `Observable{Theme}` to make theme switches
+re-render every component:
+
+```julia
+using Rocks
+import Rocks.Material3
+const M3 = Rocks.Material3
+
+theme = Observable(M3.light_theme())
+
+function App()
+    @rock M3.ThemeContext.provider(
+        @rock M3.Button("Hello"; on_press = () -> println("hi"));
+        value = theme)
+end
+
+render(App)
+```
+
+`M3.dark_theme()` / `M3.light_theme()` are the baseline schemes. Components
+read the active theme with `M3.theme()`. Icons are Unicode glyphs from the
+`M3.ICONS` dict (extend it with your own). See
+`examples/material3.jl` for a full tour with a live light/dark switch:
+
+```shell
+julia --project examples/material3.jl
+SDL_VIDEODRIVER=dummy julia --project examples/material3.jl   # headless
+```
+
 ## Examples
 
 See [`examples/`](examples/): `counter.jl`, `clock.jl`, `multiwindow.jl`,

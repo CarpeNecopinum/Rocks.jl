@@ -329,6 +329,89 @@ function fill_rect(renderer, x, y, w, h)
     return nothing
 end
 
+# ---- rounded-rect geometry (SDL_RenderGeometry) ---------------------------
+
+# Boundary points of a rounded rectangle, clockwise in screen space, with `n`
+# segments per corner. With `r = min(w, h) / 2` this traces a circle.
+function round_rect_points(x, y, w, h, r, n)
+    pts = Vector{SDL_FPoint}()
+    sizehint!(pts, 4 * (n + 1))
+    for (cx, cy, a0) in (
+        (x + w - r, y + r, -pi / 2),   # top-right: up → right
+        (x + w - r, y + h - r, 0.0),   # bottom-right: right → down
+        (x + r, y + h - r, pi / 2),    # bottom-left: down → left
+        (x + r, y + r, pi),            # top-left: left → up
+    )
+        for i in 0:n
+            a = a0 + (i / n) * (pi / 2)
+            push!(pts, SDL_FPoint(cx + r * cos(a), cy + r * sin(a)))
+        end
+    end
+    return pts
+end
+
+# One SDL_Color per vertex of a geometry batch.
+geometry_color(color) = begin
+    r, g, b, a = _to_rgba(color)
+    SDL_Color(r, g, b, a)
+end
+
+"""
+    fill_round_rect(renderer, x, y, w, h, r, color)
+
+Fill a rounded rectangle with `color` using `SDL_RenderGeometry` — a triangle
+fan from the rect center to the boundary points. With `r = min(w, h) / 2` this
+fills a circle. Degenerate (`r <= 0`) falls back to `fill_rect`.
+"""
+function fill_round_rect(renderer, x, y, w, h, r, color)
+    (w <= 0 || h <= 0) && return
+    r = clamp(r, 0.0, min(w, h) / 2)
+    r <= 0 && return (set_color(renderer, color); fill_rect(renderer, x, y, w, h))
+    n = 6
+    rim = round_rect_points(x, y, w, h, r, n)
+    m = length(rim)
+    c = geometry_color(color)
+    vertices = Vector{SDL_Vertex}(undef, m + 1)
+    vertices[1] = SDL_Vertex(SDL_FPoint(x + w / 2, y + h / 2), c, SDL_FPoint(0, 0))
+    for (i, p) in enumerate(rim)
+        vertices[i + 1] = SDL_Vertex(p, c, SDL_FPoint(0, 0))
+    end
+    indices = Cint[]
+    sizehint!(indices, 3m)
+    for i in 1:m
+        push!(indices, Cint(0), Cint(i), Cint(i % m + 1))
+    end
+    SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
+    return nothing
+end
+
+# Fill the ring between two rounded rectangles (a rounded border). The inner
+# rim is inset by `bw` from the outer one.
+function ring_round_rect(renderer, x, y, w, h, r, bw, color)
+    (w <= 0 || h <= 0 || bw <= 0) && return
+    r = clamp(r, 0.0, min(w, h) / 2)
+    bw = min(bw, w / 2, h / 2, r)
+    n = 6
+    outer = round_rect_points(x, y, w, h, r, n)
+    inner = round_rect_points(x + bw, y + bw, w - 2bw, h - 2bw, max(r - bw, 0.0), n)
+    m = length(outer)
+    c = geometry_color(color)
+    vertices = Vector{SDL_Vertex}(undef, 2m)
+    for i in 1:m
+        vertices[i] = SDL_Vertex(outer[i], c, SDL_FPoint(0, 0))
+        vertices[m + i] = SDL_Vertex(inner[i], c, SDL_FPoint(0, 0))
+    end
+    indices = Cint[]
+    sizehint!(indices, 6m)
+    for i in 1:m
+        j = i % m + 1
+        push!(indices, Cint(i - 1), Cint(m + i - 1), Cint(j - 1))
+        push!(indices, Cint(m + i - 1), Cint(m + j - 1), Cint(j - 1))
+    end
+    SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
+    return nothing
+end
+
 function draw_rect_stroke(renderer, x, y, w, h, border_width)
     bw = min(border_width, w / 2, h / 2)
     fill_rect(renderer, x, y, w, bw)           # top
@@ -341,13 +424,30 @@ end
 function draw_background!(fiber, renderer)
     props = fiber.props
     background = background_for(fiber)
-    background !== nothing && (set_color(renderer, background); fill_rect(
-        renderer, fiber.rect[1], fiber.rect[2], fiber.rect[3], fiber.rect[4]))
+    radius = float(get(props, :radius, 0))
     border_color = get(props, :border_color, nothing)
     border_width = float(get(props, :border_width, 0))
+    x, y, w, h = fiber.rect
+    if radius > 0
+        # Rounded shape: fill and border are drawn as geometry so outlined
+        # containers (no background) keep their interior transparent.
+        if background !== nothing && border_width > 0 && border_color !== nothing
+            ring_round_rect(renderer, x, y, w, h, radius, border_width, border_color)
+            fill_round_rect(
+                renderer, x + border_width, y + border_width,
+                max(w - 2border_width, 0.0), max(h - 2border_width, 0.0),
+                max(radius - border_width, 0.0), background)
+        elseif background !== nothing
+            fill_round_rect(renderer, x, y, w, h, radius, background)
+        elseif border_width > 0 && border_color !== nothing
+            ring_round_rect(renderer, x, y, w, h, radius, border_width, border_color)
+        end
+        return nothing
+    end
+    background !== nothing && (set_color(renderer, background); fill_rect(
+        renderer, fiber.rect[1], fiber.rect[2], fiber.rect[3], fiber.rect[4]))
     if border_width > 0 && border_color !== nothing
         set_color(renderer, border_color)
-        x, y, w, h = fiber.rect
         draw_rect_stroke(renderer, x, y, w, h, border_width)
     end
     return nothing
@@ -580,7 +680,15 @@ function draw_split_handle!(fiber, renderer)
     return nothing
 end
 
-# The track, filled portion and knob of a Slider.
+# The track, filled portion and knob of a Slider. The appearance is
+# prop-driven so styled variants (e.g. Rocks.Material3) can theme it:
+#
+# * `track_color` / `active_color` — inactive and active track colors.
+# * `track_height` — the track thickness (the fiber rect may be taller).
+# * `thumb_width > 0` — a gap of this width is cut into the track at the
+#   value position (Material 3 style) instead of a round knob.
+# * `rounded` — rounded track ends.
+# * `stop_color` — dots drawn at both ends of the track.
 function draw_slider!(fiber, renderer)
     value = get(fiber.props, :value, nothing)
     value isa Observable || return
@@ -588,14 +696,36 @@ function draw_slider!(fiber, renderer)
     lo = float(get(fiber.props, :min, 0))
     hi = float(get(fiber.props, :max, 1))
     frac = clamp((value[] - lo) / max(hi - lo, eps()), 0.0, 1.0)
-    track_h = 4.0
-    knob = 12.0
-    accent = get(ACCENTS, Symbol(get(fiber.props, :color, :primary)), ACCENTS[:primary])
-    set_color(renderer, (0.28, 0.28, 0.32))
-    fill_rect(renderer, x, y + (h - track_h) / 2, w, track_h)
-    set_color(renderer, accent)
-    fill_rect(renderer, x, y + (h - track_h) / 2, w * frac, track_h)
-    fill_rect(renderer, x + (w - knob) * frac, y + (h - knob) / 2, knob, knob)
+    props = fiber.props
+    track_h = float(get(props, :track_height, 4))
+    accent = get(ACCENTS, Symbol(get(props, :color, :primary)), ACCENTS[:primary])
+    track_color = get(props, :track_color, (0.28, 0.28, 0.32))
+    active_color = get(props, :active_color, accent)
+    rounded = get(props, :rounded, false)
+    thumb_w = float(get(props, :thumb_width, 0))
+    stop_color = get(props, :stop_color, nothing)
+    ty = y + (h - track_h) / 2
+    draw_track = rounded ?
+        (cx, cw, c) -> fill_round_rect(renderer, cx, ty, cw, track_h, track_h / 2, c) :
+        (cx, cw, c) -> (set_color(renderer, c); fill_rect(renderer, cx, ty, cw, track_h))
+    if thumb_w > 0
+        # Material 3 style: the handle is a gap in the track at the value.
+        gap = min(thumb_w, w)
+        active_end = x + (w - gap) * frac
+        draw_track(x, max(active_end - x, 0.0), active_color)
+        draw_track(active_end + gap, max(x + w - active_end - gap, 0.0), track_color)
+    else
+        draw_track(x, w, track_color)
+        draw_track(x, w * frac, active_color)
+        knob = 12.0
+        fill_round_rect(renderer, x + (w - knob) * frac, y + (h - knob) / 2, knob, knob,
+                        knob / 2, active_color)
+    end
+    if stop_color !== nothing
+        dot = 2.0
+        fill_round_rect(renderer, x - dot / 2, ty + track_h / 2 - dot / 2, dot, dot, dot / 2, stop_color)
+        fill_round_rect(renderer, x + w - dot / 2, ty + track_h / 2 - dot / 2, dot, dot, dot / 2, stop_color)
+    end
     return nothing
 end
 

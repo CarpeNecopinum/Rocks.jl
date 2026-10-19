@@ -26,10 +26,12 @@ src/
 ├── fiber.jl       # Fiber struct + reconciler (headless-testable)
 ├── layout.jl      # measure/place passes (headless-testable)
 ├── backend.jl     # SDL2 backend: windows, textures, fonts, colors, drawing
-├── events.jl      # SDL event routing, hit testing, press/hover tracking
+├── events.jl      # SDL event routing, hit testing, press/hover/focus tracking
 ├── runtime.jl     # main loop, render entry point, quit!
 ├── components.jl  # Row/Column convenience components
-└── widgets.jl     # pre-styled components (Button, Checkbox, Toggle, ...)
+├── widgets.jl     # pre-styled components (Button, Checkbox, Toggle, ...)
+├── mechanics.jl   # Mechanics: vanilla, appearance-prop-driven controls
+└── Material3/     # Material3 submodule: M3-themed components
 ```
 
 Render cycle: SDL events / Observable sets → mark the app dirty → re-render
@@ -51,6 +53,8 @@ timer — an idle application draws nothing.
   `julia --project=. examples/counter.jl`
 - Run an example headlessly with a captured screenshot:
   `SDL_VIDEODRIVER=dummy julia --project=. examples/screenshot.jl`
+- Material 3 showcase (light/dark toggle):
+  `julia --project=. examples/material3.jl`
 - After dependency changes: `julia --project=. -e 'using Pkg; Pkg.resolve()'`
 
 ## Conventions

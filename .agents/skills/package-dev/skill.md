@@ -20,6 +20,9 @@ architecture, conventions and gotchas.
 | `src/events.jl` | event routing, hit testing, pressables |
 | `src/runtime.jl` | `render` main loop, `quit!` |
 | `src/components.jl` | Row/Column convenience components |
+| `src/widgets.jl` | pre-styled components (Button, Checkbox, Toggle, ...) |
+| `src/mechanics.jl` | `Mechanics`: vanilla, appearance-prop-driven controls |
+| `src/Material3/` | `Material3` submodule: M3-themed components |
 
 ## Add a host element
 
@@ -62,6 +65,18 @@ their children into the window rect.
   backbuffer, not the windowing system); sample pixels by loading the PNG
   and converting to `SDL_PIXELFORMAT_RGBA32` (see `png_pixel` in
   `test/runtests.jl`).
+- Component structure tests: `find_kind(f, kind)` / `collect_kind(f, kind)`
+  in `test/runtests.jl` find fibers by kind at any depth (M3 components
+  compose 2-3 levels: M3.Button -> Mechanics.Button -> Pressable).
+- Rounded shapes: `fill_round_rect` / `ring_round_rect` in `backend.jl`
+  (SDL_RenderGeometry; `r = min(w, h)/2` draws circles); `Box`/`Pressable`
+  take a `radius` prop.
+- Overlays: absolute children take `fill = true` (stretch to the parent),
+  corner anchors (`align = :top_right` etc.) and `:center`/`:bottom`; flow
+  children fill across the cross axis with `fill = true`.
+- Focus: a press focuses the deepest fiber with `:on_key`/`:on_text_input`
+  props; keyboard events go to it; `Rocks.has_focus()` tells a component
+  whether it holds focus.
 - No Xvfb is needed: screenshots render identically under
   `SDL_VIDEODRIVER=dummy` (evaluated: the dummy driver implements window
   framebuffers; `offscreen` behaves the same; x11/Xvfb only adds the real

@@ -52,6 +52,8 @@ include("events.jl")
 include("runtime.jl")
 include("components.jl")
 include("widgets.jl")
+include("mechanics.jl")
+include(joinpath("Material3", "Material3.jl"))
 
 export @rock, @use, render, quit!, screenshot,
        Window, Box, Text, Pressable, Row, Column,
@@ -60,7 +62,8 @@ export @rock, @use, render, quit!, screenshot,
        createContext, Context,
        useEffect, useMemo, useCallback,
        useInterval, useTimeout,
-       set_default_font!, load_font
+       set_default_font!, load_font,
+       Mechanics
 
 import Observables: Observable
 export Observable
