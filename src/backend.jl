@@ -1,478 +1,117 @@
-# SDL2 backend: colors, fonts, windows, textures and drawing.
+# GTK4 backend: native widget creation, prop application, CSS, screenshots.
 #
-# All SDL calls live in this file (plus events.jl/runtime.jl), keeping the
-# reconciler and layout logic headless-testable.
+# Every host element kind maps onto a native GTK widget; GTK does the layout,
+# hit-testing, rendering and theming. All GTK calls live in this file (plus
+# events.jl for signal wiring), keeping the reconciler and hooks headless
+# with respect to GUI state.
+#
+# The sync model: `perform_render!` (fiber.jl) reconciles the fiber tree
+# without touching GTK. `sync_backend!` then walks the tree, creating widgets
+# for new fibers, attaching them to their container GTK widgets in document
+# order, applying props and creating/destroying OS windows. Component fibers
+# are transparent: their children parent to the nearest ancestor container
+# (or the implicit root box of an enclosing window).
+
+const G_ = Gtk4.G_
 
 using Downloads
+using ColorTypes: Colorant, RGBA
 
 # ---- colors --------------------------------------------------------------
 
-# Normalize a user color into (r, g, b, a) bytes.
-# Accepted: tuples/vectors of 3-4 numbers (all-integer → 0-255 scale, any
-# float → 0-1 scale), hex strings "#rgb"/"#rrggbb"/"#rrggbbaa", and
+# Normalize a user color into a CSS color string. Accepted: hex strings
+# ("#rgb"/"#rrggbb"/"#rrggbbaa"), CSS color names ("red"), tuples/vectors of
+# 3-4 numbers (all-integer → 0-255 scale, any float → 0-1 scale), and
 # ColorTypes colors.
-_to_rgba(c) = (UInt8(255), UInt8(255), UInt8(255), UInt8(255))
-
-function _to_rgba(c::Colorant)
-    rgba = RGBA{Float64}(c)
-    return (
-        UInt8(round(clamp(rgba.r, 0.0, 1.0) * 255)),
-        UInt8(round(clamp(rgba.g, 0.0, 1.0) * 255)),
-        UInt8(round(clamp(rgba.b, 0.0, 1.0) * 255)),
-        UInt8(round(clamp(rgba.alpha, 0.0, 1.0) * 255)),
-    )
-end
-
-function _to_rgba(c::Union{Tuple,Vector})
-    length(c) in 3:4 || error("colors need 3 or 4 components, got: $c")
-    if all(x -> x isa Integer, c)
-        vals = ntuple(i -> UInt8(clamp(Int(c[i]), 0, 255)), length(c))
-    else
-        vals = ntuple(i -> UInt8(round(clamp(Float64(c[i]), 0.0, 1.0) * 255)), length(c))
-    end
-    alpha = length(vals) == 4 ? vals[4] : UInt8(255)
-    return (vals[1], vals[2], vals[3], alpha)
-end
-
-function _to_rgba(c::AbstractString)
-    s = startswith(c, "#") ? c[2:end] : c
+function css_color(c::AbstractString)
+    startswith(c, "#") || return String(c)
+    s = c[2:end]
     n = length(s)
     n in (3, 6, 8) || error("hex colors need 3, 6 or 8 digits, got: \"$c\"")
-    if n == 3
-        vals = ntuple(i -> UInt8(tryparse(Int, string(s[i], s[i]); base = 16)), 3)
-        return (vals[1], vals[2], vals[3], UInt8(255))
-    end
-    rgb = (UInt8(tryparse(Int, s[1:2]; base = 16)), UInt8(tryparse(Int, s[3:4]; base = 16)),
-           UInt8(tryparse(Int, s[5:6]; base = 16)))
-    n == 6 && return (rgb..., UInt8(255))
-    return (rgb..., UInt8(tryparse(Int, s[7:8]; base = 16)))
+    n == 3 && return string("#", s[1], s[1], s[2], s[2], s[3], s[3])
+    return String(c)
 end
 
-# ---- fonts ---------------------------------------------------------------
-
-const DEFAULT_FONT = Ref{Union{Nothing,String}}(nothing)
-const FONT_CACHE = Dict{Tuple{String,Int},Ptr{TTF_Font}}()
-
-const FONT_SEARCH_PATHS = [
-    # honored first
-    get(ENV, "ROCKS_FONT", ""),
-    # linux
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-    "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
-    # macOS
-    "/System/Library/Fonts/Helvetica.ttc",
-    "/System/Library/Fonts/Supplemental/Arial.ttf",
-    "/Library/Fonts/Arial.ttf",
-    # windows
-    "C:\\Windows\\Fonts\\arial.ttf",
-    "C:\\Windows\\Fonts\\segoeui.ttf",
-]
-
-"""
-    set_default_font!(path)
-
-Set the TTF font file used by [`Text`](@ref) elements that do not carry an
-explicit `font` prop. By default a font is auto-discovered from common system
-locations (or the `ROCKS_FONT` environment variable).
-"""
-function set_default_font!(path::AbstractString)
-    isfile(path) || error("font file does not exist: $path")
-    DEFAULT_FONT[] = String(path)
-    return nothing
+function css_color(c::Colorant)
+    rgba = RGBA{Float64}(c)
+    f(x) = round(clamp(x, 0.0, 1.0); digits = 3)
+    return "rgba($(round(Int, clamp(rgba.r, 0, 1) * 255)), " *
+           "$(round(Int, clamp(rgba.g, 0, 1) * 255)), " *
+           "$(round(Int, clamp(rgba.b, 0, 1) * 255)), $(f(rgba.alpha)))"
 end
 
-function default_font()
-    DEFAULT_FONT[] !== nothing && return DEFAULT_FONT[]
-    for path in FONT_SEARCH_PATHS
-        isempty(path) && continue
-        isfile(path) && return (DEFAULT_FONT[] = path)
-    end
-    error(
-        "no default font found — set one with Rocks.set_default_font!(path), " *
-        "the ROCKS_FONT environment variable, or the `font` prop on Text elements",
-    )
-end
-
-"""
-    load_font(path, size) -> Ptr{TTF_Font}
-
-Open a TTF font (cached by path and size). Returns the SDL font pointer used
-by the backend.
-"""
-function load_font(path::AbstractString, size::Int)
-    return get!(FONT_CACHE, (String(path), size)) do
-        font = TTF_OpenFont(String(path), size)
-        font == C_NULL && error(
-            "could not load font \"$path\": $(unsafe_string(SDL_GetError()))",
-        )
-        font
-    end
+function css_color(c::Union{Tuple,Vector})
+    length(c) in 3:4 || error("colors need 3 or 4 components, got: $c")
+    rgb = ntuple(i -> begin
+        v = c[i]
+        all(x -> x isa Integer, c) ? clamp(Int(v), 0, 255) :
+        round(Int, clamp(Float64(v), 0.0, 1.0) * 255)
+    end, 3)
+    a = length(c) == 4 ? c[4] : (all(x -> x isa Integer, c) ? 1.0 : 1.0)
+    a = all(x -> x isa Integer, c) ? clamp(Float64(a), 0, 255) / 255 :
+        clamp(Float64(a), 0.0, 1.0)
+    return "rgba($(rgb[1]), $(rgb[2]), $(rgb[3]), $(round(a; digits = 3)))"
 end
 
 # ---- backend state -------------------------------------------------------
 
-mutable struct WindowState
-    ptr::Ptr{SDL_Window}
-    renderer::Ptr{SDL_Renderer}
-    id::UInt32
-    width::Int
-    height::Int
-    # Drawing is event-driven: a window is redrawn after a render pass, when
-    # the window manager exposes it, after a resize, or on hover/press
-    # styling changes. `needs_layout` re-lays out the window without
-    # re-running components (used after resizes).
-    needs_draw::Bool
-    needs_layout::Bool
+"Per-window backend state: the `GtkWindow` and the implicit root `GtkBox`
+receiving the window's children."
+mutable struct WindowHost
+    window::Any
+    box::Any
+    visible::Bool
 end
 
-mutable struct TextState
-    content::String
-    color::Tuple{UInt8,UInt8,UInt8,UInt8}
-    size::Float64
-    fontpath::String
-    renderer::Ptr{SDL_Renderer}
-    textures::Vector{Ptr{SDL_Texture}}
-    linewidths::Vector{Float64}
-end
+# Per-widget CSS: the rule for a widget's unique class, carried by a
+# GtkCssProvider added to the widget's own style context (so descendants are
+# unaffected). widget -> (provider, css class, rule)
+const STYLES = Dict{Any,Tuple{Any,String,String}}()
+const CSS_ID = Ref(0)
+const STYLE_PRIORITY = Gtk4.STYLE_PROVIDER_PRIORITY_APPLICATION
 
-mutable struct PressState
-    hovered::Bool
-    pressed::Bool
-end
+# Per-fiber backend flags (e.g. a Paned whose number `ratio` was seeded).
+const SEEDED = WeakKeyDict{Any,Bool}()
 
-mutable struct ImageState
-    texture::Ptr{SDL_Texture}
-    w::Float64 # natural size of the loaded image
-    h::Float64
-    src::String
-    renderer::Ptr{SDL_Renderer}
-end
-
-mutable struct SplitState
-    ratio::Float64 # internal split position when `ratio` is not an Observable
-    seeded::Bool
-    handle_rect::Tuple{Float64,Float64,Float64,Float64}
-    drag_start_ratio::Float64
-    drag_start_pos::Float64
-end
-
-mutable struct SliderState
-    handle_rect::Tuple{Float64,Float64,Float64,Float64}
-end
-
-# SDL init / shutdown ------------------------------------------------------
-
-const BACKEND_INITIALIZED = Ref(false)
-
-function init_backend()
-    BACKEND_INITIALIZED[] && return
-    rc = SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)
-    rc == 0 || error("SDL_Init failed: $(unsafe_string(SDL_GetError()))")
-    TTF_Init() == 0 || error("TTF_Init failed: $(unsafe_string(SDL_GetError()))")
-    IMG_Init(Cint(IMG_INIT_PNG) | Cint(IMG_INIT_JPG)) # best effort; PNG/JPG cover common formats
-    BACKEND_INITIALIZED[] = true
-    return nothing
-end
-
-function shutdown_backend()
-    BACKEND_INITIALIZED[] || return
-    for fiber in collect(values(WINDOW_BY_ID))
-        destroy_window!(fiber)
-    end
-    empty!(WINDOW_BY_ID)
-    empty!(ACTIVE_PRESS)
-    empty!(HOVERED)
-    # Cached font pointers are invalidated by TTF_Quit — close and forget them.
-    for font in values(FONT_CACHE)
-        font != C_NULL && TTF_CloseFont(font)
-    end
-    empty!(FONT_CACHE)
-    TTF_Quit()
-    SDL_Quit()
-    BACKEND_INITIALIZED[] = false
-    return nothing
-end
-
-# ---- windows -------------------------------------------------------------
-
-# Compute a reasonable position for a new window according to its
-# positioning props:
-#
-# * `position = :cascade` (default) — centered on the chosen display with a
-#   cascade offset per already-open window, so multiple windows don't stack
-#   exactly on top of each other.
-# * `position = :centered` — exactly centered on the chosen display.
-# * `position = :manual` — exact `x`/`y`.
-# * `position = :mouse` — top-left corner at the current pointer position.
-#
-# `display` selects the display for the centered modes (`nothing`, the
-# default, means the display the pointer is on). Giving `x`/`y` without a
-# `position` implies `:manual`.
-function window_position(fiber)
-    props = fiber.props
-    position = if haskey(props, :position)
-        Symbol(props[:position])
-    elseif haskey(props, :x) || haskey(props, :y)
-        :manual
-    else
-        :cascade
-    end
-    width, height = window_size(fiber)
-
-    if position === :manual
-        return (Int(get(props, :x, 0)), Int(get(props, :y, 0)))
-    elseif position === :mouse
-        mx, my = Ref{Cint}(0), Ref{Cint}(0)
-        SDL_GetMouseState(mx, my)
-        return (Int(mx[]), Int(my[]))
-    end
-
-    bx, by, bw, bh = display_bounds(get(props, :display, nothing))
-    (bw <= 0 || bh <= 0) && return (SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED)
-    cascade = position === :cascade ? 32 * (length(WINDOW_BY_ID) % 8) : 0
-    x = bx + max(0, bw - width) ÷ 2 + cascade
-    y = by + max(0, bh - height) ÷ 2 + cascade
-    return (x, y)
-end
-
-# Bounds (x, y, w, h) of a display: `nothing` selects the display the mouse
-# pointer is on (falling back to display 0). Returns (0, 0, 0, 0) when the
-# display cannot be queried (e.g. headless drivers).
-function display_bounds(display)
-    if display === nothing
-        mx, my = Ref{Cint}(0), Ref{Cint}(0)
-        SDL_GetMouseState(mx, my)
-        index = SDL_GetPointDisplayIndex(Ref(SDL_Point(mx[], my[])))
-        index = index < 0 ? 0 : index
-    else
-        index = Int(display)
-    end
-    bounds = Ref(SDL_Rect(0, 0, 0, 0))
-    if SDL_GetDisplayBounds(index, bounds) == 0
-        return (bounds[].x, bounds[].y, bounds[].w, bounds[].h)
-    end
-    mode = Ref(SDL_DisplayMode(0, 0, 0, 0, C_NULL))
-    if SDL_GetDesktopDisplayMode(index, mode) == 0
-        return (0, 0, mode[].w, mode[].h)
-    end
-    return (0, 0, 0, 0)
-end
-
-window_size(fiber) =
-    (Int(get(fiber.props, :width, 800)), Int(get(fiber.props, :height, 600)))
-
-function create_window!(fiber)
-    title = string(get(fiber.props, :title, "Rocks"))
-    width, height = window_size(fiber)
-    resizable = Bool(get(fiber.props, :resizable, false))
-    flags = UInt32(SDL_WINDOW_SHOWN)
-    resizable && (flags |= UInt32(SDL_WINDOW_RESIZABLE))
-    xpos, ypos = window_position(fiber)
-    ptr = SDL_CreateWindow(title, xpos, ypos, width, height, flags)
-    ptr == C_NULL && error("SDL_CreateWindow failed: $(unsafe_string(SDL_GetError()))")
-    renderer = SDL_CreateRenderer(
-        ptr,
-        Cint(-1),
-        UInt32(SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC),
-    )
-    if renderer == C_NULL # fall back to a software renderer
-        renderer = SDL_CreateRenderer(ptr, Cint(-1), UInt32(SDL_RENDERER_SOFTWARE))
-    end
-    renderer == C_NULL && error("SDL_CreateRenderer failed: $(unsafe_string(SDL_GetError()))")
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND)
-    state = WindowState(ptr, renderer, SDL_GetWindowID(ptr), width, height, true, false)
-    fiber.host = state
-    WINDOW_BY_ID[state.id] = fiber
-    return state
-end
-
-function destroy_window!(fiber)
-    fiber.host isa WindowState || return
-    state = fiber.host
-    delete!(WINDOW_BY_ID, state.id)
-    SDL_DestroyRenderer(state.renderer)
-    SDL_DestroyWindow(state.ptr)
-    fiber.host = nothing
-    return nothing
-end
-
-# Re-apply window props that the user may have changed between renders.
-function sync_window!(fiber)
-    fiber.host isa WindowState || return
-    state = fiber.host
-    title = string(get(fiber.props, :title, "Rocks"))
-    resizable = Bool(get(fiber.props, :resizable, false))
-    current = unsafe_string(SDL_GetWindowTitle(state.ptr))
-    current != title && SDL_SetWindowTitle(state.ptr, title)
-    want = resizable ? SDL_TRUE : SDL_FALSE
-    (SDL_GetWindowFlags(state.ptr) & UInt32(SDL_WINDOW_RESIZABLE) != 0) != (want != 0) &&
-        SDL_SetWindowResizable(state.ptr, want)
-    return nothing
-end
-
-# ---- drawing helpers -----------------------------------------------------
-
-function set_color(renderer, color)
-    r, g, b, a = _to_rgba(color)
-    SDL_SetRenderDrawColor(renderer, r, g, b, a)
-    return nothing
-end
-
-function fill_rect(renderer, x, y, w, h)
-    (w <= 0 || h <= 0) && return
-    rect = SDL_Rect(round(Int, x), round(Int, y), round(Int, w), round(Int, h))
-    SDL_RenderFillRect(renderer, Ref(rect))
-    return nothing
-end
-
-# ---- rounded-rect geometry (SDL_RenderGeometry) ---------------------------
-
-# Boundary points of a rounded rectangle, clockwise in screen space, with `n`
-# segments per corner. With `r = min(w, h) / 2` this traces a circle.
-function round_rect_points(x, y, w, h, r, n)
-    pts = Vector{SDL_FPoint}()
-    sizehint!(pts, 4 * (n + 1))
-    for (cx, cy, a0) in (
-        (x + w - r, y + r, -pi / 2),   # top-right: up → right
-        (x + w - r, y + h - r, 0.0),   # bottom-right: right → down
-        (x + r, y + h - r, pi / 2),    # bottom-left: down → left
-        (x + r, y + r, pi),            # top-left: left → up
-    )
-        for i in 0:n
-            a = a0 + (i / n) * (pi / 2)
-            push!(pts, SDL_FPoint(cx + r * cos(a), cy + r * sin(a)))
-        end
-    end
-    return pts
-end
-
-# One SDL_Color per vertex of a geometry batch.
-geometry_color(color) = begin
-    r, g, b, a = _to_rgba(color)
-    SDL_Color(r, g, b, a)
-end
+# Compare two widget wrappers by their GObject identity (fetched children may
+# be fresh wrapper objects for the same GObject).
+_same_widget(a, b) =
+    a !== nothing && b !== nothing && getfield(a, :handle) == getfield(b, :handle)
 
 """
-    fill_round_rect(renderer, x, y, w, h, r, color)
+    init_backend()
 
-Fill a rounded rectangle with `color` using `SDL_RenderGeometry` — a triangle
-fan from the rect center to the boundary points. With `r = min(w, h) / 2` this
-fills a circle. Degenerate (`r <= 0`) falls back to `fill_rect`.
+Called once before the first render. GTK initializes lazily — the display
+opens when the first `GtkWindow` is created — so there is nothing to do.
 """
-function fill_round_rect(renderer, x, y, w, h, r, color)
-    (w <= 0 || h <= 0) && return
-    r = clamp(r, 0.0, min(w, h) / 2)
-    r <= 0 && return (set_color(renderer, color); fill_rect(renderer, x, y, w, h))
-    n = 6
-    rim = round_rect_points(x, y, w, h, r, n)
-    m = length(rim)
-    c = geometry_color(color)
-    vertices = Vector{SDL_Vertex}(undef, m + 1)
-    vertices[1] = SDL_Vertex(SDL_FPoint(x + w / 2, y + h / 2), c, SDL_FPoint(0, 0))
-    for (i, p) in enumerate(rim)
-        vertices[i + 1] = SDL_Vertex(p, c, SDL_FPoint(0, 0))
-    end
-    indices = Cint[]
-    sizehint!(indices, 3m)
-    for i in 1:m
-        push!(indices, Cint(0), Cint(i), Cint(i % m + 1))
-    end
-    SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
-    return nothing
+init_backend() = nothing
+
+"""
+    shutdown_backend()
+
+Called after the application unmounts. Window teardown happens per fiber in
+[`backend_unmount!`](@ref); nothing global to release.
+"""
+shutdown_backend() = nothing
+
+# ---- widget creation -----------------------------------------------------
+
+"G_H / :v symbols from Rocks' direction props."
+function _orientation_h(props; default_h::Bool)
+    d = Symbol(get(props, :direction, default_h ? :row : :column))
+    d === :row && return true
+    d === :column && return false
+    error("direction must be :row or :column, got $d")
 end
 
-# Fill the ring between two rounded rectangles (a rounded border). The inner
-# rim is inset by `bw` from the outer one.
-function ring_round_rect(renderer, x, y, w, h, r, bw, color)
-    (w <= 0 || h <= 0 || bw <= 0) && return
-    r = clamp(r, 0.0, min(w, h) / 2)
-    bw = min(bw, w / 2, h / 2, r)
-    n = 6
-    outer = round_rect_points(x, y, w, h, r, n)
-    inner = round_rect_points(x + bw, y + bw, w - 2bw, h - 2bw, max(r - bw, 0.0), n)
-    m = length(outer)
-    c = geometry_color(color)
-    vertices = Vector{SDL_Vertex}(undef, 2m)
-    for i in 1:m
-        vertices[i] = SDL_Vertex(outer[i], c, SDL_FPoint(0, 0))
-        vertices[m + i] = SDL_Vertex(inner[i], c, SDL_FPoint(0, 0))
-    end
-    indices = Cint[]
-    sizehint!(indices, 6m)
-    for i in 1:m
-        j = i % m + 1
-        push!(indices, Cint(i - 1), Cint(m + i - 1), Cint(j - 1))
-        push!(indices, Cint(m + i - 1), Cint(m + j - 1), Cint(j - 1))
-    end
-    SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
-    return nothing
+function _paned_vertical(props)
+    d = Symbol(get(props, :direction, :horizontal))
+    d === :vertical && return true
+    d === :horizontal && return false
+    error("direction must be :horizontal or :vertical, got $d")
 end
 
-function draw_rect_stroke(renderer, x, y, w, h, border_width)
-    bw = min(border_width, w / 2, h / 2)
-    fill_rect(renderer, x, y, w, bw)           # top
-    fill_rect(renderer, x, y + h - bw, w, bw)  # bottom
-    fill_rect(renderer, x, y, bw, h)           # left
-    fill_rect(renderer, x + w - bw, y, bw, h)  # right
-    return nothing
-end
-
-function draw_background!(fiber, renderer)
-    props = fiber.props
-    background = background_for(fiber)
-    radius = float(get(props, :radius, 0))
-    border_color = get(props, :border_color, nothing)
-    border_width = float(get(props, :border_width, 0))
-    x, y, w, h = fiber.rect
-    if radius > 0
-        # Rounded shape: fill and border are drawn as geometry so outlined
-        # containers (no background) keep their interior transparent.
-        if background !== nothing && border_width > 0 && border_color !== nothing
-            ring_round_rect(renderer, x, y, w, h, radius, border_width, border_color)
-            fill_round_rect(
-                renderer, x + border_width, y + border_width,
-                max(w - 2border_width, 0.0), max(h - 2border_width, 0.0),
-                max(radius - border_width, 0.0), background)
-        elseif background !== nothing
-            fill_round_rect(renderer, x, y, w, h, radius, background)
-        elseif border_width > 0 && border_color !== nothing
-            ring_round_rect(renderer, x, y, w, h, radius, border_width, border_color)
-        end
-        return nothing
-    end
-    background !== nothing && (set_color(renderer, background); fill_rect(
-        renderer, fiber.rect[1], fiber.rect[2], fiber.rect[3], fiber.rect[4]))
-    if border_width > 0 && border_color !== nothing
-        set_color(renderer, border_color)
-        draw_rect_stroke(renderer, x, y, w, h, border_width)
-    end
-    return nothing
-end
-
-# The background a box-like fiber draws with, taking pressable state into
-# account.
-function background_for(fiber)
-    props = fiber.props
-    if fiber.kind === _PRESSABLE && fiber.host isa PressState
-        pressed = fiber.host.pressed
-        hovered = fiber.host.hovered
-        if pressed && haskey(props, :pressed_background)
-            return get(props, :pressed_background, nothing)
-        elseif hovered && haskey(props, :hover_background)
-            return get(props, :hover_background, nothing)
-        end
-    end
-    return get(props, :background, nothing)
-end
-
-# ---- text ----------------------------------------------------------------
-
-# Build the text content from the element's children: values are stringified
-# and concatenated (like JSX text children), element children are ignored.
+# Stringified text content of a fiber (label/button children).
 function text_content(fiber)
     content = get(fiber.props, :content, nothing)
     content !== nothing && return string(content)
@@ -484,69 +123,114 @@ function text_content(fiber)
     return join(parts, "")
 end
 
-function text_props(fiber)
+# The options of a DropDown: the `options` prop or the call's children.
+function dropdown_options(fiber)
+    opts = get(fiber.props, :options, nothing)
+    opts === nothing && (opts = fiber.props[:children])
+    return String[string(o) for o in flat_children(opts)]
+end
+
+# Create (or return the existing) GTK widget of a host fiber. Windows are
+# created in `sync_window!` instead.
+function create_widget!(fiber)
+    fiber.host !== nothing && return fiber.host
     props = fiber.props
-    size = float(get(props, :size, 16))
-    color = _to_rgba(get(props, :color, (1.0, 1.0, 1.0)))
-    fontpath = haskey(props, :font) ? string(props[:font]) : default_font()
-    return size, color, fontpath
+    host = if fiber.kind === _BOX
+        GtkBox(
+            _orientation_h(props; default_h = false) ? Gtk4.Orientation_HORIZONTAL :
+            Gtk4.Orientation_VERTICAL,
+            Int(get(props, :gap, 0)),
+        )
+    elseif fiber.kind === _LABEL
+        GtkLabel(text_content(fiber))
+    elseif fiber.kind === _BUTTON
+        label = get(props, :label, nothing)
+        GtkButton(label === nothing ? text_content(fiber) : string(label))
+    elseif fiber.kind === _PICTURE
+        path = resolve_image_src(string(get(props, :src, "")))
+        path === nothing ? G_.Picture_new() : G_.Picture_new_for_filename(path)
+    elseif fiber.kind === _PANED
+        GtkPaned(_paned_vertical(props) ? Gtk4.Orientation_VERTICAL :
+                 Gtk4.Orientation_HORIZONTAL)
+    elseif fiber.kind === _SCALE
+        GtkScale(Gtk4.Orientation_HORIZONTAL, float(get(props, :min, 0)),
+                 float(get(props, :max, 1)), _scale_step(props))
+    elseif fiber.kind === _CHECKBUTTON
+        label = get(props, :label, nothing)
+        label === nothing ? GtkCheckButton() : GtkCheckButton(string(label))
+    elseif fiber.kind === _SWITCH
+        on = get(props, :on, nothing)
+        GtkSwitch(on isa Observable ? Bool(on[]) : on === true)
+    elseif fiber.kind === _PROGRESSBAR
+        GtkProgressBar()
+    elseif fiber.kind === _DROPDOWN
+        GtkDropDown(dropdown_options(fiber))
+    elseif fiber.kind === _NOTEBOOK
+        GtkNotebook()
+    elseif fiber.kind === _ENTRY
+        GtkEntry()
+    else
+        error("no GTK widget for host kind: $(fiber.kind)")
+    end
+    fiber.host = host
+    wire_events!(fiber)
+    return host
 end
 
-# (Re)create the cached textures of a text fiber if its props changed.
-function ensure_text!(fiber, renderer)
-    content = text_content(fiber)
-    size, color, fontpath = text_props(fiber)
-    state = fiber.host
-    if state isa TextState &&
-       state.content == content && state.color == color && state.size == size &&
-       state.fontpath == fontpath && state.renderer == renderer
-        return state
-    end
-    state === nothing || free_text!(state)
-    font = load_font(fontpath, max(round(Int, size), 1))
-    lines = split(content, '\n'; keepempty = true)
-    textures = Ptr{SDL_Texture}[]
-    linewidths = Float64[]
-    scolor = SDL_Color(color...)
-    for line in lines
-        surface = TTF_RenderUTF8_Blended(font, String(line), scolor)
-        if surface == C_NULL
-            push!(textures, C_NULL)
-            push!(linewidths, 0.0)
-            continue
-        end
-        texture = SDL_CreateTextureFromSurface(renderer, surface)
-        SDL_FreeSurface(surface)
-        w_ref, h_ref = Ref{Cint}(0), Ref{Cint}(0)
-        SDL_QueryTexture(texture, C_NULL, C_NULL, w_ref, h_ref)
-        push!(textures, texture)
-        push!(linewidths, Float64(w_ref[]))
-    end
-    fiber.host = TextState(content, color, size, fontpath, renderer, textures, linewidths)
-    return fiber.host
+_scale_step(props) = begin
+    lo = float(get(props, :min, 0))
+    hi = float(get(props, :max, 1))
+    max(abs(hi - lo) / 100, 1e-6)
 end
 
-function free_text!(state::TextState)
-    renderer = state.renderer
-    for texture in state.textures
-        texture != C_NULL && SDL_DestroyTexture(texture)
-    end
-    empty!(state.textures)
-    empty!(state.linewidths)
-    state.renderer = C_NULL
+# ---- windows -------------------------------------------------------------
+
+function create_window!(fiber)
+    props = fiber.props
+    title = string(get(props, :title, "Rocks"))
+    width = Int(get(props, :width, 800))
+    height = Int(get(props, :height, 600))
+    resizable = Bool(get(props, :resizable, false))
+    win = GtkWindow(title, width, height, resizable, true)
+    box = GtkBox(Gtk4.Orientation_VERTICAL, 0)
+    win[] = box
+    host = WindowHost(win, box, true)
+    fiber.host = host
+    wire_window_events!(fiber)
+    return host
+end
+
+function destroy_window!(fiber)
+    fiber.host isa WindowHost || return
+    delete!(STYLES, fiber.host.box)
+    Gtk4.destroy(fiber.host.window)
+    fiber.host = nothing
     return nothing
+end
+
+# Re-apply window props that the user may have changed between renders, and
+# create the OS window on first sight.
+function sync_window!(fiber)
+    fiber.host isa WindowHost || create_window!(fiber)
+    host = fiber.host
+    props = fiber.props
+    title = string(get(props, :title, "Rocks"))
+    Gtk4.title(host.window) != title &&
+        Gtk4.set_gtk_property!(host.window, :title, title)
+    resizable = Bool(get(props, :resizable, false))
+    Bool(Gtk4.get_gtk_property(host.window, :resizable)) != resizable &&
+        Gtk4.set_gtk_property!(host.window, :resizable, resizable)
+    # the window's implicit root box takes the box props (`direction`, `gap`,
+    # `padding`, `align`, `background`, `border_*`, `radius`)
+    apply_box_props!(host.box, props; sizeable = false)
+    return host
 end
 
 # ---- images --------------------------------------------------------------
 
 const IMAGE_CACHE_DIR = Ref{Union{Nothing,String}}(nothing)
 
-# Cached loaded surfaces, keyed by resolved source path. Surfaces are
-# renderer-independent and kept for the session so measuring and drawing an
-# image read the file only once.
-const IMAGE_SURFACES = Dict{String,Ptr{SDL_Surface}}()
-
-# Resolve an `Image` `src` prop: local paths pass through; URLs are fetched
+# Resolve a `Picture` `src` prop: local paths pass through; URLs are fetched
 # with `Downloads` into a per-session cache directory. Returns `nothing` when
 # the source cannot be resolved.
 function resolve_image_src(src)
@@ -569,191 +253,435 @@ function resolve_image_src(src)
     return isfile(src) ? src : nothing
 end
 
-# Loaded surface for an image source (cached). Returns C_NULL when the image
-# cannot be loaded.
-function image_surface(src::String)
-    return get!(IMAGE_SURFACES, src) do
-        path = resolve_image_src(src)
-        path === nothing && return C_NULL
-        surface = IMG_Load(path)
-        surface == C_NULL && @warn "Rocks: could not load image" src path
-        return surface
-    end
-end
+# ---- CSS -----------------------------------------------------------------
 
-function free_image!(state::ImageState)
-    state.texture != C_NULL && SDL_DestroyTexture(state.texture)
-    state.texture = C_NULL
-    state.renderer = C_NULL
-    return nothing
-end
-
-# (Re)create the texture of an Image fiber if its `src` changed.
-function ensure_image!(fiber, renderer)
-    src = string(get(fiber.props, :src, ""))
-    state = fiber.host
-    if state isa ImageState && state.src == src && state.renderer == renderer
-        return state
-    end
-    state === nothing || free_image!(state)
-    texture, w, h = C_NULL, 0.0, 0.0
-    surface = image_surface(src)
-    if surface != C_NULL
-        texture = SDL_CreateTextureFromSurface(renderer, surface)
-        if texture == C_NULL
-            @warn "Rocks: could not create texture for image" src
-        else
-            w_ref, h_ref = Ref{Cint}(0), Ref{Cint}(0)
-            SDL_QueryTexture(texture, C_NULL, C_NULL, w_ref, h_ref)
-            w, h = Float64(w_ref[]), Float64(h_ref[])
-        end
-    end
-    fiber.host = ImageState(texture, w, h, src, renderer)
-    return fiber.host
-end
-
-function draw_image!(fiber, renderer)
-    state = ensure_image!(fiber, renderer)
-    x, y, w, h = fiber.rect
-    if state.texture == C_NULL
-        # placeholder while missing/failed
-        set_color(renderer, (0.20, 0.20, 0.24))
-        fill_rect(renderer, x, y, w, h)
-        return
-    end
-    dst = SDL_Rect(round(Int, x), round(Int, y), round(Int, w), round(Int, h))
-    SDL_RenderCopy(renderer, state.texture, C_NULL, Ref(dst))
-    return nothing
-end
-
-# ---- the draw pass -------------------------------------------------------
-
-"""
-    draw!(fiber, renderer)
-
-Draw a fiber's subtree into `renderer`. The renderer must belong to the OS
-window the fiber was laid out for.
-"""
-function draw!(fiber, renderer)
-    is_window(fiber) && return # windows are drawn by their own draw pass
-    if is_text(fiber)
-        state = ensure_text!(fiber, renderer)
-        x, y = fiber.rect[1], fiber.rect[2]
-        font = load_font(state.fontpath, max(round(Int, state.size), 1))
-        lineheight = Float64(TTF_FontHeight(font))
-        for (i, texture) in enumerate(state.textures)
-            texture == C_NULL && continue
-            w = state.linewidths[i]
-            dst = SDL_Rect(round(Int, x), round(Int, y + (i-1) * lineheight),
-                           round(Int, w), round(Int, lineheight))
-            SDL_RenderCopy(renderer, texture, C_NULL, Ref(dst))
-        end
-        return
-    end
-    if fiber.kind === _IMAGE
-        draw_image!(fiber, renderer)
-        return
-    end
-    if fiber.kind === _SLIDER
-        draw_slider!(fiber, renderer)
-        return
-    end
-    if fiber.kind === _BOX || fiber.kind === _PRESSABLE
-        draw_background!(fiber, renderer)
-    end
-    for child in fiber.children
-        draw!(child, renderer)
-    end
-    if fiber.kind === _SPLIT
-        draw_split_handle!(fiber, renderer)
-    end
-    return nothing
-end
-
-# The draggable handle of a Split, drawn after its panes.
-function draw_split_handle!(fiber, renderer)
-    state = fiber.host
-    state isa SplitState || return
-    hx, hy, hw, hh = state.handle_rect
-    set_color(renderer, get(fiber.props, :handle_color, (0.35, 0.35, 0.40)))
-    fill_rect(renderer, hx, hy, hw, hh)
-    return nothing
-end
-
-# The track, filled portion and knob of a Slider. The appearance is
-# prop-driven so styled variants (e.g. Rocks.Material3) can theme it:
-#
-# * `track_color` / `active_color` — inactive and active track colors.
-# * `track_height` — the track thickness (the fiber rect may be taller).
-# * `thumb_width > 0` — a gap of this width is cut into the track at the
-#   value position (Material 3 style) instead of a round knob.
-# * `rounded` — rounded track ends.
-# * `stop_color` — dots drawn at both ends of the track.
-function draw_slider!(fiber, renderer)
-    value = get(fiber.props, :value, nothing)
-    value isa Observable || return
-    x, y, w, h = fiber.rect
-    lo = float(get(fiber.props, :min, 0))
-    hi = float(get(fiber.props, :max, 1))
-    frac = clamp((value[] - lo) / max(hi - lo, eps()), 0.0, 1.0)
-    props = fiber.props
-    track_h = float(get(props, :track_height, 4))
-    accent = get(ACCENTS, Symbol(get(props, :color, :primary)), ACCENTS[:primary])
-    track_color = get(props, :track_color, (0.28, 0.28, 0.32))
-    active_color = get(props, :active_color, accent)
-    rounded = get(props, :rounded, false)
-    thumb_w = float(get(props, :thumb_width, 0))
-    stop_color = get(props, :stop_color, nothing)
-    ty = y + (h - track_h) / 2
-    draw_track = rounded ?
-        (cx, cw, c) -> fill_round_rect(renderer, cx, ty, cw, track_h, track_h / 2, c) :
-        (cx, cw, c) -> (set_color(renderer, c); fill_rect(renderer, cx, ty, cw, track_h))
-    if thumb_w > 0
-        # Material 3 style: the handle is a gap in the track at the value.
-        gap = min(thumb_w, w)
-        active_end = x + (w - gap) * frac
-        draw_track(x, max(active_end - x, 0.0), active_color)
-        draw_track(active_end + gap, max(x + w - active_end - gap, 0.0), track_color)
+# Apply a per-widget CSS rule. `f(cls)` builds the rule text for the widget's
+# unique CSS class (`cls`); an empty result styles nothing. Re-rendering with
+# a changed rule reloads the provider in place.
+function style!(f::Function, widget)
+    entry = get(STYLES, widget, nothing)
+    if entry === nothing
+        CSS_ID[] += 1
+        cls = "rocks-$(CSS_ID[])"
+        rule = String(f(cls))
+        isempty(strip(rule)) && return
+        prov = GtkCssProvider(rule)
+        push!(G_.get_style_context(widget), prov, STYLE_PRIORITY)
+        G_.add_css_class(widget, cls)
+        STYLES[widget] = (prov, cls, rule)
     else
-        draw_track(x, w, track_color)
-        draw_track(x, w * frac, active_color)
-        knob = 12.0
-        fill_round_rect(renderer, x + (w - knob) * frac, y + (h - knob) / 2, knob, knob,
-                        knob / 2, active_color)
-    end
-    if stop_color !== nothing
-        dot = 2.0
-        fill_round_rect(renderer, x - dot / 2, ty + track_h / 2 - dot / 2, dot, dot, dot / 2, stop_color)
-        fill_round_rect(renderer, x + w - dot / 2, ty + track_h / 2 - dot / 2, dot, dot, dot / 2, stop_color)
+        rule = String(f(entry[2]))
+        rule == entry[3] && return
+        G_.load_from_data(entry[1], rule, -1)
+        STYLES[widget] = (entry[1], entry[2], rule)
     end
     return nothing
 end
 
-const DEFAULT_WINDOW_BACKGROUND = (0.12, 0.12, 0.14)
+# The base styling rules shared by box-like widgets.
+function box_css_parts(props)
+    parts = String[]
+    bg = get(props, :background, nothing)
+    bg !== nothing && push!(parts, "background: $(css_color(bg));")
+    bc = get(props, :border_color, nothing)
+    bw = Int(get(props, :border_width, 0))
+    bc !== nothing && bw > 0 &&
+        push!(parts, "border: $(bw)px solid $(css_color(bc));")
+    radius = get(props, :radius, nothing)
+    radius !== nothing && push!(parts, "border-radius: $(Int(radius))px;")
+    return parts
+end
 
-"""
-    draw_window!(fiber, present = true)
+# ---- prop application ----------------------------------------------------
 
-Clear the OS window of a window fiber with its background and draw its
-children, then present. [`screenshot`](@ref) draws with `present = false` to
-read the backbuffer before presenting.
-"""
-function draw_window!(fiber, present::Bool = true)
-    state = fiber.host
-    state isa WindowState || return
-    renderer = state.renderer
-    set_color(renderer, get(fiber.props, :background, DEFAULT_WINDOW_BACKGROUND))
-    SDL_RenderClear(renderer)
-    for child in fiber.children
-        draw!(child, renderer)
+function margins!(widget, props)
+    padding = get(props, :padding, nothing)
+    padding === nothing && return
+    p = Int(padding)
+    for m in (:margin_start, :margin_end, :margin_top, :margin_bottom)
+        Gtk4.set_gtk_property!(widget, m, p)
     end
-    present && SDL_RenderPresent(renderer)
     return nothing
 end
+
+function size_requests!(widget, props)
+    w = get(props, :width, nothing)
+    h = get(props, :height, nothing)
+    (w === nothing && h === nothing) && return
+    Gtk4.size_request(
+        widget,
+        (w === nothing ? -1 : Int(w), h === nothing ? -1 : Int(h)),
+    )
+    return nothing
+end
+
+# GTK align name (:start/:center/:end) → Gtk4.Align_* value; nothing = FILL.
+function _gtk_align(v)
+    v === nothing && return nothing
+    a = Symbol(v)
+    a === :start && return Gtk4.Align_START
+    a === :center && return Gtk4.Align_CENTER
+    a === :end && return Gtk4.Align_END
+    error("align must be :start, :center or :end, got $v")
+end
+
+# Apply the box props (`direction`, `gap`, `align`, `padding`, `background`,
+# `border_*`, `radius`) to a GtkBox. Shared by `Box` elements and each
+# `Window`'s implicit root box. `sizeable` also applies `width`/`height` size
+# requests — disabled for a window's root box, whose size is the top-level
+# window's.
+function apply_box_props!(box, props; sizeable = true)
+    horizontal = _orientation_h(props; default_h = false)
+    Gtk4.set_gtk_property!(
+        box, :orientation,
+        horizontal ? Gtk4.Orientation_HORIZONTAL : Gtk4.Orientation_VERTICAL,
+    )
+    Gtk4.set_gtk_property!(box, :spacing, Int(get(props, :gap, 0)))
+    align = _gtk_align(get(props, :align, nothing))
+    align !== nothing &&
+        Gtk4.set_gtk_property!(box, horizontal ? :valign : :halign, align)
+    margins!(box, props)
+    sizeable && size_requests!(box, props)
+    style!(box) do cls
+        parts = box_css_parts(props)
+        isempty(parts) ? "" : ".$cls { $(join(parts, " ")) }"
+    end
+    return nothing
+end
+
+# Apply the props of a host fiber to its widget. Called on every sync pass;
+# setting a GTK property to its current value is a cheap no-op.
+function apply_props!(fiber)
+    kind = fiber.kind
+    kind === _WINDOW && return sync_window!(fiber)
+    host = fiber.host
+    host === nothing && return
+    props = fiber.props
+
+    if kind === _BOX
+        apply_box_props!(host, props)
+    elseif kind === _LABEL
+        Gtk4.set_gtk_property!(host, :label, text_content(fiber))
+        Gtk4.set_gtk_property!(host, :wrap, get(props, :wrap, false) === true)
+        align = Symbol(get(props, :align, :start))
+        xalign = align === :center ? 0.5 : align === :end ? 1.0 : 0.0
+        Gtk4.set_gtk_property!(host, :xalign, xalign)
+        style!(host) do cls
+            parts = box_css_parts(props)
+            color = get(props, :color, nothing)
+            color !== nothing && push!(parts, "color: $(css_color(color));")
+            size = get(props, :size, nothing)
+            size !== nothing && push!(parts, "font-size: $(Float64(size))px;")
+            isempty(parts) ? "" : ".$cls { $(join(parts, " ")) }"
+        end
+    elseif kind === _BUTTON
+        # the label is only shown when there are no element children (a child
+        # widget, if any, attaches in `sync_container_children!`)
+        if !any(c -> c isa Element, props[:children])
+            label = get(props, :label, nothing)
+            Gtk4.set_gtk_property!(
+                host, :label,
+                label === nothing ? text_content(fiber) : string(label),
+            )
+        end
+        Gtk4.set_gtk_property!(host, :sensitive, get(props, :disabled, false) !== true)
+        margins!(host, props)
+        size_requests!(host, props)
+        style!(host) do cls
+            parts = box_css_parts(props)
+            base = isempty(parts) ? "" : ".$cls { $(join(parts, " ")) }"
+            hover = get(props, :hover_background, nothing)
+            hover === nothing ||
+                (base = string(base, " .$cls:hover { background: $(css_color(hover)); }"))
+            pressed = get(props, :pressed_background, nothing)
+            pressed === nothing ||
+                (base = string(base, " .$cls:active { background: $(css_color(pressed)); }"))
+            return base
+        end
+    elseif kind === _PICTURE
+        src = string(get(props, :src, ""))
+        path = isempty(src) ? nothing : resolve_image_src(src)
+        G_.set_filename(host, path)  # accepts nothing
+        w = get(props, :width, nothing)
+        h = get(props, :height, nothing)
+        both = w !== nothing && h !== nothing
+        Gtk4.set_gtk_property!(host, :keep_aspect_ratio, !both)
+        Gtk4.set_gtk_property!(
+            host, :content_fit,
+            both ? Gtk4.ContentFit_FILL : Gtk4.ContentFit_CONTAIN,
+        )
+        size_requests!(host, props)
+    elseif kind === _PANED
+        _sync_paned_position!(fiber)
+        size_requests!(host, props)
+    elseif kind === _SCALE
+        adj = Gtk4.adjustment(host)
+        lo = float(get(props, :min, 0))
+        hi = float(get(props, :max, 1))
+        (G_.get_lower(adj) != lo || G_.get_upper(adj) != hi) &&
+            Gtk4.configure!(adj; lower = lo, upper = hi)
+        value = get(props, :value, nothing)
+        want = value isa Observable ? Float64(value[]) : float(value)
+        G_.get_value(adj) != want && G_.set_value(adj, clamp(want, lo, hi))
+        size_requests!(host, props)
+        style!(host) do cls
+            parts = box_css_parts(props)
+            isempty(parts) ? "" : ".$cls { $(join(parts, " ")) }"
+        end
+    elseif kind === _CHECKBUTTON
+        checked = get(props, :checked, nothing)
+        want = checked isa Observable ? Bool(checked[]) : checked === true
+        Bool(Gtk4.get_gtk_property(host, :active)) != want &&
+            Gtk4.set_gtk_property!(host, :active, want)
+        label = get(props, :label, nothing)
+        label !== nothing &&
+            Gtk4.set_gtk_property!(host, :label, string(label))
+        Gtk4.set_gtk_property!(host, :sensitive, get(props, :disabled, false) !== true)
+        margins!(host, props)
+    elseif kind === _SWITCH
+        on = get(props, :on, nothing)
+        want = on isa Observable ? Bool(on[]) : on === true
+        Bool(Gtk4.get_gtk_property(host, :active)) != want &&
+            Gtk4.set_gtk_property!(host, :active, want)
+        Gtk4.set_gtk_property!(host, :sensitive, get(props, :disabled, false) !== true)
+        # a stretched switch looks odd; keep it at one end unless aligned
+        align = _gtk_align(get(props, :align, :start))
+        align !== nothing && Gtk4.set_gtk_property!(host, :halign, align)
+        margins!(host, props)
+    elseif kind === _PROGRESSBAR
+        fraction = get(props, :fraction, 0.0)
+        f = fraction isa Observable ? Float64(fraction[]) : Float64(fraction)
+        f = clamp(f, 0.0, 1.0)
+        Gtk4.fraction(host) != f && Gtk4.set_gtk_property!(host, :fraction, f)
+    elseif kind === _DROPDOWN
+        _sync_dropdown!(fiber)
+        size_requests!(host, props)
+        margins!(host, props)
+    elseif kind === _NOTEBOOK
+        selected = get(props, :selected, nothing)
+        want = selected isa Observable ? Int(selected[]) : selected
+        if want !== nothing && 1 <= want <= length(host)
+            G_.get_current_page(host) + 1 != want &&
+                G_.set_current_page(host, want - 1)
+        end
+    elseif kind === _ENTRY
+        text = get(props, :text, nothing)
+        want = text isa Observable ? String(text[]) :
+               text === nothing ? nothing : string(text)
+        if want !== nothing && Gtk4.get_gtk_property(host, :text) != want
+            Gtk4.set_gtk_property!(host, :text, want)
+        end
+        ph = get(props, :placeholder, nothing)
+        ph === nothing ||
+            Gtk4.set_gtk_property!(host, :placeholder_text, string(ph))
+        size_requests!(host, props)
+    end
+    return nothing
+end
+
+# Paned `ratio`: a number seeds the position once (so dragging is not
+# overwritten on re-renders); an Observable is applied on every sync (the
+# notify::position handler writes back the dragged fraction, and values agree
+# so no loop occurs).
+function _sync_paned_position!(fiber)
+    host = fiber.host
+    ratio = get(fiber.props, :ratio, nothing)
+    vertical = Int(Gtk4.get_gtk_property(host, :orientation)) == 1
+    size = vertical ? Int(Gtk4.G_.get_height(host)) : Int(Gtk4.G_.get_width(host))
+    size > 0 || return
+    if ratio isa Observable
+        pos = clamp(round(Int, Float64(ratio[]) * size), 0, size)
+        G_.get_position(host) != pos && G_.set_position(host, pos)
+    else
+        want = ratio === nothing ? 0.5 : Float64(ratio)
+        get!(SEEDED, fiber) do
+            G_.set_position(host, clamp(round(Int, want * size), 0, size))
+            true
+        end
+    end
+    return nothing
+end
+
+# DropDown options/selection: rebuild the string model when the options
+# changed (selection resets; the `selected` prop re-applies it).
+function _sync_dropdown!(fiber)
+    host = fiber.host
+    props = fiber.props
+    opts = dropdown_options(fiber)
+    model = G_.get_model(host)
+    current = model === nothing ? String[] : String[string(s) for s in collect(model)]
+    if current != opts
+        G_.set_model(host, G_.StringList_new(opts))
+    end
+    selected = get(props, :selected, nothing)
+    want = selected isa Observable ? Int(selected[]) : selected
+    if want !== nothing && 1 <= want <= length(opts)
+        Int(G_.get_selected(host)) + 1 != want &&
+            G_.set_selected(host, UInt32(want - 1))
+    end
+    return nothing
+end
+
+# ---- container children --------------------------------------------------
+
+# Attach `kids` (the host widgets of a container's subtree, in document
+# order) to the container's GTK widget.
+function sync_container_children!(fiber, kids)
+    kind = fiber.kind
+    kind === _WINDOW && return sync_box_children!(fiber.host.box, kids)
+    kind === _BOX && return sync_box_children!(fiber.host, kids)
+    if kind === _PANED
+        pane = fiber.host
+        set_pane!(pane, 1, length(kids) >= 1 ? kids[1] : nothing)
+        set_pane!(pane, 2, length(kids) >= 2 ? kids[2] : nothing)
+    elseif kind === _BUTTON
+        btn = fiber.host
+        if isempty(kids)
+            _same_widget(Gtk4.G_.get_child(btn), nothing) || (btn[] = nothing)
+        else
+            _same_widget(Gtk4.G_.get_child(btn), kids[1]) || (btn[] = kids[1])
+        end
+    elseif kind === _NOTEBOOK
+        sync_notebook_pages!(fiber, kids)
+    end
+    return nothing
+end
+
+# Keep a GtkBox's children in document order. A mismatch (insertion, removal
+# or replacement) rebuilds the list: removal only unparents (the fiber keeps
+# the widget alive), so re-appending is cheap.
+function sync_box_children!(box, kids)
+    current = collect(box)
+    if length(current) == length(kids) &&
+       all(i -> _same_widget(current[i], kids[i]), eachindex(kids))
+        return
+    end
+    empty!(box)
+    for w in kids
+        push!(box, w)
+    end
+    return nothing
+end
+
+function set_pane!(pane, i::Int, widget)
+    current = i == 1 ? Gtk4.G_.get_start_child(pane) : Gtk4.G_.get_end_child(pane)
+    _same_widget(current, widget) && return
+    if i == 1
+        pane[1] = widget
+    else
+        pane[2] = widget
+    end
+    return nothing
+end
+
+function sync_notebook_pages!(fiber, kids)
+    nb = fiber.host
+    tabs = get(fiber.props, :tabs, nothing)
+    tab_label(i) = begin
+        t = tabs === nothing ? nothing : (i <= length(tabs) ? tabs[i] : nothing)
+        t === nothing ? "Page $i" : string(t)
+    end
+    pages = length(nb)
+    mismatch = pages != length(kids)
+    if !mismatch
+        for i in 1:pages
+            page = Gtk4.G_.get_nth_page(nb, i - 1)
+            if !_same_widget(page, kids[i])
+                mismatch = true
+                break
+            end
+        end
+    end
+    if mismatch
+        empty!(nb)
+        for (i, w) in enumerate(kids)
+            push!(nb, w, tab_label(i))
+        end
+    else
+        for (i, w) in enumerate(kids)
+            G_.set_tab_label_text(nb, w, tab_label(i))
+        end
+    end
+    return nothing
+end
+
+# ---- the sync walk -------------------------------------------------------
+
+# Walk a fiber subtree: create widgets, attach container children in document
+# order, apply props. Returns the widgets this subtree contributes to the
+# enclosing container (windows contribute nothing — they are toplevels; every
+# other host fiber contributes its widget; component fibers are transparent).
+function sync_backend!(fiber)
+    if is_window(fiber)
+        sync_window!(fiber)
+        kids = Any[]
+        for child in fiber.children
+            append!(kids, sync_backend!(child))
+        end
+        sync_container_children!(fiber, kids)
+        return Any[]
+    elseif is_host(fiber.kind)
+        host = create_widget!(fiber)
+        kids = Any[]
+        for child in fiber.children
+            append!(kids, sync_backend!(child))
+        end
+        sync_container_children!(fiber, kids)
+        apply_props!(fiber)
+        return Any[host]
+    else
+        kids = Any[]
+        for child in fiber.children
+            append!(kids, sync_backend!(child))
+        end
+        return kids
+    end
+end
+
+# ---- unmount -------------------------------------------------------------
+
+# Release the widget of an unmounting fiber: windows are destroyed, regular
+# widgets are unparented (dropped) and freed by the GC.
+function backend_unmount!(fiber)
+    if is_window(fiber)
+        return destroy_window!(fiber)
+    end
+    widget = fiber.host
+    widget === nothing && return
+    unparent_widget!(widget)
+    delete!(STYLES, widget)
+    fiber.host = nothing
+    return nothing
+end
+
+"Drop `widget` from its GTK parent so it disappears immediately."
+function unparent_widget!(widget)
+    Gtk4.hasparent(widget) || return
+    parent = Gtk4.parent(widget)
+    if parent isa Gtk4.GtkBox
+        delete!(parent, widget)
+    elseif parent isa Gtk4.GtkPaned
+        for i in 1:2
+            current = i == 1 ? Gtk4.G_.get_start_child(parent) :
+                      Gtk4.G_.get_end_child(parent)
+            _same_widget(current, widget) && set_pane!(parent, i, nothing)
+        end
+    elseif parent isa Gtk4.GtkNotebook
+        for i in 1:length(parent)
+            _same_widget(Gtk4.G_.get_nth_page(parent, i - 1), widget) &&
+                (deleteat!(parent, i); break)
+        end
+    elseif parent isa Union{Gtk4.GtkWindow,Gtk4.GtkButton}
+        _same_widget(parent[], widget) && (parent[] = nothing)
+    end
+    return nothing
+end
+
+# ---- screenshots ---------------------------------------------------------
 
 # The first fiber in a subtree with a live OS window.
 function find_window_fiber(fiber)
-    is_window(fiber) && fiber.host isa WindowState && return fiber
+    is_window(fiber) && fiber.host isa WindowHost && return fiber
     for child in fiber.children
         found = find_window_fiber(child)
         found !== nothing && return found
@@ -761,22 +689,34 @@ function find_window_fiber(fiber)
     return nothing
 end
 
+# Pump the GLib main context until every visible window is mapped and has a
+# size allocation. Mapping/layout is asynchronous (the compositor needs
+# several context iterations) — a fixed small pump count races with it, which
+# made screenshots intermittent. Bounded; returns whether all were mapped.
+function wait_windows_mapped!(root; attempts = 300)
+    for _ in 1:attempts
+        wins = collect_windows!(Fiber[], root)
+        visible = [w for w in wins if w.host isa WindowHost && !w.hidden]
+        isempty(visible) && return true
+        mapped_and_sized(w) = begin
+            win = w.host.window
+            Bool(Gtk4.G_.get_mapped(win)) && Int(Gtk4.G_.get_width(win)) > 0 &&
+                Int(Gtk4.G_.get_height(win)) > 0
+        end
+        all(mapped_and_sized, visible) && return true
+        pump(1)
+    end
+    return false
+end
+
 """
     screenshot(window, path) -> path
 
-Capture the current frame of a window into a PNG file at `path` and return
-`path`. `window` is the root fiber of a rendered tree (the first window found
-in the tree is captured) or a window fiber. The window is redrawn before the
-capture, so the file reflects the current tree and state; the screen keeps
-showing the redrawn frame afterwards.
-
-Works in normal windows and headlessly (SDL's dummy driver writes real
-pixels with a software renderer), which makes pixel-verified screenshot
-tests possible without any display:
-
-```julia
-root = render(App; frames = 3, screenshot = "app.png")  # capture and quit
-```
+Capture the current appearance of a window into a PNG file at `path` and
+return `path`. `window` is the root fiber of a rendered tree (the first
+window found in the tree is captured) or a window fiber. The window must be
+mapped — in the interactive loop it always is; in bounded `frames` runs the
+frames pump the GLib main context first.
 
 For trees with several windows, pass the specific window fiber to capture a
 different one.
@@ -785,32 +725,44 @@ function screenshot(window, path::AbstractString)
     window isa Fiber ||
         error("screenshot expects a rendered window or root fiber, got: $(typeof(window))")
     fiber = find_window_fiber(window)
-    fiber === nothing &&
-        error("no rendered window found in the given fiber tree")
-    state = fiber.host
-    w_ref, h_ref = Ref{Cint}(0), Ref{Cint}(0)
-    SDL_GetWindowSize(state.ptr, w_ref, h_ref)
-    w, h = max(Int(w_ref[]), 1), max(Int(h_ref[]), 1)
-    # Redraw without presenting so the backbuffer holds the current frame,
-    # read it, then present the redrawn frame.
-    draw_window!(fiber, false)
-    surface = SDL_CreateRGBSurfaceWithFormat(
-        UInt32(0), Cint(w), Cint(h), Cint(32), UInt32(SDL_PIXELFORMAT_RGBA32),
-    )
-    surface == C_NULL &&
-        error("SDL_CreateRGBSurfaceWithFormat failed: $(unsafe_string(SDL_GetError()))")
-    s = unsafe_load(surface)
-    rect = SDL_Rect(Cint(0), Cint(0), Cint(w), Cint(h))
-    rc = SDL_RenderReadPixels(
-        state.renderer, Ref(rect), UInt32(SDL_PIXELFORMAT_RGBA32), s.pixels, s.pitch,
-    )
-    ok = Cint(0)
-    if rc == 0
-        ok = IMG_SavePNG(surface, String(path))
+    fiber === nothing && error("no rendered window found in the given fiber tree")
+    fiber.host isa WindowHost || error("the window has not been synced/created yet")
+    wait_windows_mapped!(fiber) ||
+        error("the window is still not mapped after pumping (no compositor/display?)")
+    return widget_png(fiber.host.window, String(path))
+end
+
+# GtkWidgetPaintable → render node → Cairo ARGB surface → PNG. Requires the
+# widget to be mapped. (`gtk_widget_snapshot` is GTK-private in 4.12.)
+#
+# A snapshot taken while the widget is mid-invalidate (its layout was just
+# changed) yields a NULL render node — the PNG would be blank. Pumping the
+# main context lets GTK re-layout, so the snapshot is retried until it
+# produces a node.
+function widget_png(widget, path)
+    w = Int(Gtk4.G_.get_width(widget))
+    h = Int(Gtk4.G_.get_height(widget))
+    (w > 0 && h > 0) || error("widget is not mapped yet (zero allocation)")
+    surf = Gtk4.CairoARGBSurface(w, h)
+    cr = ccall((:cairo_create, Gtk4.libcairo), Ptr{Cvoid}, (Ptr{Cvoid},),
+               getfield(surf, :ptr))
+    node = Ptr{Cvoid}(C_NULL)
+    for _ in 1:60
+        paintable = Gtk4.G_.WidgetPaintable_new(widget)
+        snap = GtkSnapshot()
+        Gtk4.G_.snapshot(paintable, snap, Float64(w), Float64(h))
+        node = ccall((:gtk_snapshot_free_to_node, Gtk4.libgtk4), Ptr{Cvoid},
+                     (Ptr{Gtk4.GObject},), getfield(snap, :handle))
+        node != C_NULL && break
+        pump(2) # let the pending layout settle
     end
-    SDL_FreeSurface(surface)
-    SDL_RenderPresent(state.renderer)
-    rc != 0 && error("SDL_RenderReadPixels failed: $(unsafe_string(SDL_GetError()))")
-    ok != 0 && error("IMG_SavePNG failed: $(unsafe_string(SDL_GetError()))")
+    node == C_NULL &&
+        error("could not snapshot the widget (the render node stayed empty)")
+    ccall((:gsk_render_node_draw, Gtk4.libgtk4), Cvoid,
+          (Ptr{Cvoid}, Ptr{Cvoid}), node, cr)
+    ccall((:gsk_render_node_unref, Gtk4.libgtk4), Cvoid, (Ptr{Cvoid},), node)
+    ok = ccall((:cairo_surface_write_to_png, Gtk4.libcairo), Cint,
+               (Ptr{Cvoid}, Cstring), getfield(surf, :ptr), path)
+    ok == 0 || error("could not write PNG to $path")
     return path
 end

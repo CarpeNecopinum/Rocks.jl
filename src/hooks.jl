@@ -98,6 +98,17 @@ component (React rules apply). The expression is evaluated exactly once, on
 the first render — later prop changes do not re-create the Ref/Observable.
 """
 macro use(expr)
+    # A spaced `@use X` inside a prop list (`text = @use Observable(""), other
+    # = ...`) swallows the following comma, so Julia mis-parses the props into
+    # an assignment whose left side contains this macro call. Catch the
+    # tell-tale shapes and explain the fix.
+    if expr isa Expr && expr.head in (:(=), :kw, :tuple)
+        error(
+            "this @use swallowed the comma after its expression (spaced " *
+            "macros consume `a, b` lists) — wrap it in parentheses, " *
+            "`@use(X)`, or write this prop last in the list",
+        )
+    end
     return quote
         hook, _ = use_hook(() -> begin
             value = $(esc(expr))

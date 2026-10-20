@@ -1,8 +1,13 @@
+# !!! PARKED — not ported yet !!!
+#
+# This example still uses the SDL-era API (Text, Pressable, Image, Slider,
+# ThemeContext provider, …). The Material3 module is parked until its GTK4
+# port is designed; this file will be rewritten alongside it.
+#
 # Material Design 3 showcase: every Rocks.Material3 component, themed through
 # ThemeContext with a live light/dark switch.
 #
 #   julia --project examples/material3.jl
-#   SDL_VIDEODRIVER=dummy julia --project examples/material3.jl   # headless
 #
 # The theme is an `Observable{Theme}` provided through ThemeContext.provider —
 # toggling the switch replaces the Theme instance and every component

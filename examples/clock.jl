@@ -1,12 +1,10 @@
-# Effects and timers: a clock driven by useInterval, demonstrating
-# useEffect with dependencies and useTimeout. State is an Observable
-# created with @use.
+# Hooks and timers: a clock driven by useInterval, demonstrating useEffect
+# with dependencies. State is an Observable created with @use.
 #
 #   julia --project examples/clock.jl
 
 using Rocks
 using Dates
-import Rocks: Text
 
 function App()
     now = @use Observable(Dates.now())
@@ -24,15 +22,12 @@ function App()
     elapsed = max(0, (now[] - started[]) / Millisecond(1) ÷ 1000)
 
     @rock Window(
-        @rock Text(Dates.format(now[], "HH:MM:SS"); size = 48),
-        @rock Text("running for ", elapsed, "s"; size = 16, color = "#8899aa"),
-        @rock Pressable(
-            @rock Text(elapsed > 0 ? "Restart" : "Start");
-            on_press = () -> started[] = Dates.now(),
-            background = (0.30, 0.30, 0.34),
-            hover_background = (0.38, 0.38, 0.42),
-            pressed_background = (0.24, 0.24, 0.27),
-            padding = 10, align = :center);
+        @rock Label(Dates.format(now[], "HH:MM:SS"); size = 48),
+        @rock Label("running for ", elapsed, "s"; size = 16, color = "#8899aa"),
+        @rock Button(elapsed > 0 ? "Restart" : "Start";
+                     on_press = () -> started[] = Dates.now(),
+                     padding = 10, background = (0.30, 0.30, 0.34),
+                     hover_background = (0.38, 0.38, 0.42));
         title = "Clock", width = 320, height = 200,
         padding = 24, gap = 16, align = :center)
 end

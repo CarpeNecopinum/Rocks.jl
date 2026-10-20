@@ -2,146 +2,196 @@
 #
 # An `Element` is the immutable description of a piece of UI — the equivalent
 # of the object React's `createElement` returns. Its `kind` is either
-# * a `HostKind` singleton (`Window`, `Box`, `Text`, `Pressable`) rendered by
-#   the SDL backend, or
+# * a `HostKind` singleton (`Window`, `Box`, `Label`, `Button`, ...) mapped
+#   onto a native GTK widget by the backend, or
 # * a plain Julia function (a *component*), called with the props as keyword
 #   arguments on every re-render.
 
 """
 Abstract supertype of the built-in (host) element kinds. Host kinds are
-rendered directly by the SDL backend, while component kinds are Julia
-functions re-invoked on every render.
+mapped onto native GTK widgets by the backend, while component kinds are
+Julia functions re-invoked on every render.
 """
 abstract type HostKind end
 
 struct _WindowKind <: HostKind end
 struct _BoxKind <: HostKind end
-struct _TextKind <: HostKind end
-struct _PressableKind <: HostKind end
-struct _ImageKind <: HostKind end
-struct _SplitKind <: HostKind end
-struct _SliderKind <: HostKind end
+struct _LabelKind <: HostKind end
+struct _ButtonKind <: HostKind end
+struct _PictureKind <: HostKind end
+struct _PanedKind <: HostKind end
+struct _ScaleKind <: HostKind end
+struct _CheckButtonKind <: HostKind end
+struct _SwitchKind <: HostKind end
+struct _ProgressBarKind <: HostKind end
+struct _DropDownKind <: HostKind end
+struct _NotebookKind <: HostKind end
+struct _EntryKind <: HostKind end
 
 """
     Window
 
-Host element kind for an OS window. Windows are components like everything
-else: a render tree may contain any number of `Window` elements, which turns
-into a multi-window application, and a component may conditionally render a
-`Window` to open a dialog.
+Host element kind for an OS window (a `GtkWindow`). Windows are components
+like everything else: a render tree may contain any number of `Window`
+elements, which turns into a multi-window application, and a component may
+conditionally render a `Window` to open a dialog.
 
-Props: `title`, `width`, `height`, `resizable`, `background`, plus the
-positioning props `position`, `display`, `x` and `y`:
-
-* `position = :cascade` (default) — centered on the chosen display with a
-  cascade offset per already-open window, so multiple windows don't stack
-  exactly on top of each other.
-* `position = :centered` — exactly centered on the chosen display.
-* `position = :manual` — top-left corner at exactly `x`/`y`.
-* `position = :mouse` — top-left corner at the current pointer position.
-
-`display` selects the display index for the centered modes (`nothing`, the
-default, means the display the pointer is currently on). Giving `x`/`y`
-without a `position` implies `:manual`.
-
-The layout props shared with [`Box`](@ref) (`padding`, `gap`, `direction`,
-`align`) control how the window's children are laid out, and the callbacks
-`on_key(key)`, `on_text_input(text)` and `on_close()` (return `false` from
-`on_close` to keep the window open) are also supported.
+Props: `title`, `width`, `height`, `resizable`, plus the callback
+`on_close()` (return `false` from `on_close` to keep the window open).
 """
 const Window = _WindowKind()
 
 """
     Box
 
-Host element kind for a rectangular layout container. Boxes draw an optional
-background/border and lay their children out in a column (default) or a row.
-See [`Row`](@ref)/[`Column`](@ref) for convenient wrappers.
+Host element kind for a layout container (a `GtkBox`). Boxes lay their
+children out in a column (default) or a row. See [`Row`](@ref)/[`Column`](@ref)
+for convenient wrappers.
 
-Props: `background`, `border_color`, `border_width`, `direction` (`:column`
-or `:row`), `gap`, `padding`, `align` (`:start`, `:center` or `:end` along
-the cross axis), `width`, `height`, and `position = :absolute` with `x`/`y`
-to place a child manually instead of flowing it.
+Props: `direction` (`:column` or `:row`), `gap` (spacing between children,
+default 0), `padding` (uniform margin around the children), `width`,
+`height`, and `background` (a CSS color string applied via GTK CSS).
 """
 const Box = _BoxKind()
 
 """
-    Text
+    Label
 
-Host element kind for text. The content is given as the children of the
-element and is stringified and concatenated, so values can be interpolated
-directly: `@rock Text("Count: ", count)`. Multi-line text is written with
-`"\\n"` line breaks.
+Host element kind for text (a `GtkLabel`). The content is given as the
+children of the element and is stringified and concatenated, so values can be
+interpolated directly: `@rock Label("Count: ", count)`. Multi-line text is
+written with `"\\n"` line breaks; `wrap = true` wraps long lines.
 
-Props: `size` (font size in px, default 16), `color`, `font` (path to a TTF
-font; defaults to the auto-discovered system font, see
-[`set_default_font!`](@ref)).
+Props: `size` (font size in px via CSS, default 16), `color` (a CSS color
+string), `wrap`, `align` (`:start`, `:center` or `:end` for the horizontal
+text alignment).
 """
-const Text = _TextKind()
-
-"""
-    Pressable
-
-Host element kind for pressable areas (React-Native style). A `Pressable`
-lays out and draws like a [`Box`](@ref) but also participates in pointer
-event dispatch.
-
-Props: `on_press`, `on_press_in`, `on_press_out`, `on_hover_in`,
-`on_hover_out` (all no-argument callables), `disabled`, and the styling props
-`background`, `hover_background`, `pressed_background`, `border_color`,
-`border_width` plus the layout props of [`Box`](@ref).
-"""
-const Pressable = _PressableKind()
+const Label = _LabelKind()
 
 """
-    Image
+    Button
 
-Host element kind for a graphics file. `src` is a path or an URL (fetched
-with `Downloads` and cached in a temporary directory) to a PNG/JPG/BMP/...
-file, loaded through SDL2_image.
+Host element kind for a push button (a `GtkButton`). The button's label is
+given as the children of the element (stringified) or via `label` as a prop.
 
-Props: `src` (required), `width`/`height` — scale to `width` (keeping the
-aspect ratio) when only one is given, stretch when both are given, natural
-size when neither.
+Props: `on_press` (a no-argument callable, fired on click), `disabled`
+(greys the button out and ignores clicks), `label` (a string; the children
+win when given).
 """
-const Image = _ImageKind()
+const Button = _ButtonKind()
 
 """
-    Split
+    Picture
 
-Host element kind for a resizable split: the first two children are the two
-panes, separated by a draggable handle that resizes them. Useful as a window
-divider.
+Host element kind for a graphics file (a `GtkPicture`). `src` is a path or an
+URL (fetched with `Downloads` and cached in a temporary directory) to a
+PNG/JPG/... file.
+
+Props: `src` (required), `width`/`height` — scale to fit, keeping the aspect
+ratio unless both are given.
+"""
+const Picture = _PictureKind()
+
+"""
+    Paned
+
+Host element kind for a resizable split (a `GtkPaned`): the first two
+children are the two panes, separated by a draggable divider.
 
 Props: `direction` (`:horizontal` — panes side by side, or `:vertical` —
 panes stacked), `ratio` — an `Observable` (controlled: dragging writes it) or
-a number (the initial split position, default 0.5), `handle` (handle
-thickness in px, default 6), `handle_color`, `width`, `height`. The panes are
-laid out to fill their side of the split exactly, so give them backgrounds to
-see them.
+a number (the initial split position, default 0.5), `width`, `height`.
 """
-const Split = _SplitKind()
+const Paned = _PanedKind()
 
 """
-    Slider
+    Scale
 
-Host element kind for a slider: click or drag anywhere on it to set its
+Host element kind for a slider (a `GtkScale`): click or drag to set its
 value.
 
 Props: `value` — an `Observable` (required; dragging writes it), `min` and
-`max` (default 0 and 1), `width` (default 200), `height` (default 24), and an
-`on_change(value)` callback fired while the value changes.
+`max` (default 0 and 1), `width` (default 200), `on_change(value)` fired
+while the value changes.
 """
-const Slider = _SliderKind()
+const Scale = _ScaleKind()
+
+"""
+    CheckButton
+
+Host element kind for a check button (a `GtkCheckButton`) — a checkbox with
+an optional label.
+
+Props: `checked` — an `Observable{Bool}` (two-way), `label`, `on_change()`.
+"""
+const CheckButton = _CheckButtonKind()
+
+"""
+    Switch
+
+Host element kind for a switch (a `GtkSwitch`).
+
+Props: `on` — an `Observable{Bool}` (two-way), `on_change()`.
+"""
+const Switch = _SwitchKind()
+
+"""
+    ProgressBar
+
+Host element kind for a progress bar (a `GtkProgressBar`).
+
+Props: `fraction` — a number or `Observable` between 0 and 1.
+"""
+const ProgressBar = _ProgressBarKind()
+
+"""
+    DropDown
+
+Host element kind for a dropdown (a `GtkDropDown`): a collapsed selection
+that expands into a list.
+
+Props: `options` (a vector of strings, or the options as the call's
+children), `selected` — an `Observable{Int}` with the 1-based index
+(two-way), `on_change()`.
+"""
+const DropDown = _DropDownKind()
+
+"""
+    Notebook
+
+Host element kind for a tabbed container (a `GtkNotebook`): one entry of
+`tabs::Vector{String}` per element in `children`; the selected page is shown
+and switching tabs is handled by GTK.
+
+Props: `tabs` (required), `selected` — an `Observable{Int}` with the active
+page index (two-way).
+"""
+const Notebook = _NotebookKind()
+
+"""
+    Entry
+
+Host element kind for a single-line text entry (a `GtkEntry`).
+
+Props: `text` — an `Observable{String}` (two-way), `placeholder`,
+`on_submit()` (fired on Enter), `width`.
+"""
+const Entry = _EntryKind()
 
 # Internal aliases used throughout the implementation.
 const _WINDOW = Window
 const _BOX = Box
-const _TEXT = Text
-const _PRESSABLE = Pressable
-const _IMAGE = Image
-const _SPLIT = Split
-const _SLIDER = Slider
+const _LABEL = Label
+const _BUTTON = Button
+const _PICTURE = Picture
+const _PANED = Paned
+const _SCALE = Scale
+const _CHECKBUTTON = CheckButton
+const _SWITCH = Switch
+const _PROGRESSBAR = ProgressBar
+const _DROPDOWN = DropDown
+const _NOTEBOOK = Notebook
+const _ENTRY = Entry
 
 is_host(kind) = kind isa HostKind
 
@@ -224,6 +274,29 @@ concatenated (they become text). `nothing` and `false` children are skipped,
 which makes conditional rendering (`cond && @rock Kind(...)`) work like in
 JSX.
 """
+# Find an assignment in a *positional* position (not inside a `;` parameter
+# block). The Julia parser folds comma-separated items into a tuple, and a
+# prop that lost its `;` separator becomes an assignment inside that tuple —
+# the parser then rejects the result with a confusing "invalid argument
+# destructuring syntax" error. Only `name = value` and `(a, b) = value`
+# shapes are reported; assignments to a field (`x[] = v`) are ordinary
+# expressions and stay allowed.
+function find_positional_assignment(x)
+    x isa Expr || return nothing
+    x.head === :parameters && return nothing # props live here
+    if x.head === :(=)
+        lhs = x.args[1]
+        if lhs isa Symbol || (lhs isa Expr && lhs.head === :tuple)
+            return x
+        end
+    end
+    for a in x.args
+        found = find_positional_assignment(a)
+        found === nothing || return found
+    end
+    return nothing
+end
+
 macro rock(call)
     if call isa Expr && call.head === :tuple
         # Spaced macros swallow commas: `@rock A(...), B(...)` arrives as the
@@ -232,10 +305,30 @@ macro rock(call)
         # passed through as child expressions. The resulting tuple is
         # flattened into the parent's children.
         for item in call.args
-            item isa Expr && item.head === :kw && error(
-                "a prop (`$(item.args[1]) = ...`) after a trailing comma was " *
-                "captured by the previous @rock call — put props after the " *
-                "`;` separator instead",
+            if item isa Expr && item.head === :kw
+                error(
+                    "a prop (`$(item.args[1]) = ...`) after a trailing comma was " *
+                    "captured by the previous @rock call — put props after the " *
+                    "`;` separator instead",
+                )
+            elseif item isa Expr && item.head === :(=) && item.args[1] isa Symbol
+                error(
+                    "a prop (`$(item.args[1]) = ...`) after a trailing comma was " *
+                    "captured by the previous @rock call — put props after the " *
+                    "`;` separator instead",
+                )
+            end
+            # The same mistake one level deeper: the parser folds the items
+            # after a comma into a tuple, and a prop that lost its `;`
+            # separator turns into an assignment inside that tuple (which the
+            # parser then rejects with a confusing "invalid argument
+            # destructuring syntax").
+            swallowed = find_positional_assignment(item)
+            swallowed === nothing && continue
+            error(
+                "a prop was captured by the previous @rock call — put props " *
+                "after the `;` separator instead (offending item: " *
+                "`$(swallowed)`)",
             )
         end
         items = Any[
@@ -308,7 +401,7 @@ function push_children!(v, e)
     if e isa Element
         push!(v, e)
     elseif e isa AbstractString
-        push!(v, Element(_TEXT, Dict{Symbol,Any}(), Any[String(e)]))
+        push!(v, Element(_LABEL, Dict{Symbol,Any}(), Any[String(e)]))
     elseif e isa Union{Tuple,Vector}
         for sub in e
             push_children!(v, sub)
@@ -316,7 +409,7 @@ function push_children!(v, e)
     elseif e === nothing || e isa Bool
         # skipped
     else
-        push!(v, Element(_TEXT, Dict{Symbol,Any}(), Any[string(e)]))
+        push!(v, Element(_LABEL, Dict{Symbol,Any}(), Any[string(e)]))
     end
     return v
 end

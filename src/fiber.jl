@@ -22,11 +22,7 @@ mutable struct Fiber
     hook_index::Int
     mounted::Bool
     hidden::Bool                   # window closed by the user without on_close
-    # layout (see layout.jl); rect is in window-local coordinates
-    measured::Tuple{Float64,Float64}
-    rect::Tuple{Float64,Float64,Float64,Float64}
-    # backend state: WindowState for windows, TextState for text,
-    # PressState for pressables, nothing otherwise
+    # backend state: the GTK widget, attached by the backend
     host::Any
 end
 
@@ -41,24 +37,12 @@ function Fiber(kind, props, parent)
         0,
         true,
         false,
-        (0.0, 0.0),
-        (0.0, 0.0, 0.0, 0.0),
-        initial_host(kind),
+        nothing, # host: the GTK widget, attached by the backend
     )
 end
 
-initial_host(kind) = if kind === _PRESSABLE
-    PressState(false, false)
-elseif kind === _SPLIT
-    SplitState(0.5, false, (0.0, 0.0, 0.0, 0.0), 0.5, 0.0)
-elseif kind === _SLIDER
-    SliderState((0.0, 0.0, 0.0, 0.0))
-else
-    nothing
-end
-
 is_window(f::Fiber) = f.kind === _WINDOW
-is_text(f::Fiber) = f.kind === _TEXT
+is_label(f::Fiber) = f.kind === _LABEL
 
 # Children of an element: positional children win; otherwise the `children`
 # prop (keyword) is used, if any.
@@ -107,7 +91,7 @@ end
 # elements reconcile their child elements. Text fibers hold raw content
 # children (no child fibers).
 function perform_render!(fiber)
-    fiber.kind === _TEXT && return
+    fiber.kind === _LABEL && return # the label's text comes from its children
     if is_host(fiber.kind)
         reconcile_children!(fiber, fiber.props[:children])
     else
@@ -183,13 +167,11 @@ end
     unmount!(fiber)
 
 Unmount a fiber: recursively unmount children, run effect cleanups in reverse
-hook order and release backend resources.
+hook order and release backend resources (the GTK widget).
 """
 function unmount!(fiber)
     fiber.mounted || return
     fiber.mounted = false
-    # A focused fiber inside the unmounted subtree must release focus.
-    FOCUSED[] !== nothing && inside_subtree(FOCUSED[], fiber) && (FOCUSED[] = nothing)
     for child in fiber.children
         unmount!(child)
     end
@@ -206,8 +188,8 @@ function unmount!(fiber)
         end
     end
     empty!(fiber.hooks)
-    if is_window(fiber)
-        destroy_window!(fiber)
+    if is_host(fiber.kind)
+        backend_unmount!(fiber)
     end
     return nothing
 end

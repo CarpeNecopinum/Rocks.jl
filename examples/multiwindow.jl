@@ -4,35 +4,25 @@
 #   julia --project examples/multiwindow.jl
 
 using Rocks
-import Rocks: Text
 
 function SecondWindow()
     @rock Window(
-        @rock Text("I am a second window.");
+        @rock Label("I am a second window.");
         title = "Second window", width = 280, height = 140,
-        padding = 20) # positioned next to the main window automatically
+        padding = 20)
 end
 
 function App()
     open = @use Observable(false)
     @rock Window(
-        @rock Text("Multi-window demo"; size = 24),
-        @rock Text("Toggle the second window:"),
-        @rock Pressable(
-            @rock Text(open[] ? "Close second window" : "Open second window");
-            on_press = () -> open[] = !open[],
-            background = (0.20, 0.45, 0.95),
-            hover_background = (0.25, 0.52, 1.00),
-            pressed_background = (0.16, 0.38, 0.82),
-            padding = 12, align = :center),
-        @rock Pressable(
-            @rock Text("Quit");
-            on_press = quit!,
-            background = (0.55, 0.22, 0.22),
-            hover_background = (0.65, 0.28, 0.28),
-            pressed_background = (0.45, 0.18, 0.18),
-            padding = 12, align = :center);
-        title = "Main window", width = 340, height = 260,
+        @rock Label("Multi-window demo"; size = 24),
+        @rock Label("Toggle the second window:"),
+        @rock Button(open[] ? "Close second window" : "Open second window";
+                     on_press = () -> open[] = !open[]),
+        @rock Button("Quit"; on_press = () -> quit!(),
+                     background = (0.55, 0.22, 0.22),
+                     hover_background = (0.65, 0.28, 0.28));
+        title = "Main window", width = 340, height = 240,
         padding = 24, gap = 16,
         open[] && @rock SecondWindow())
 end

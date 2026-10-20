@@ -1,17 +1,38 @@
-# The runtime: the main loop that ties events, state updates, rendering and
-# timers together, plus the `run` entry point and `quit!`.
+# The runtime: the entry point that ties reconciliation, GTK widgets, timers
+# and the GLib main loop together, plus `quit!`.
+#
+# With GTK, the GLib main loop owns the event delivery: Rocks' state changes
+# mark the tree dirty, an idle callback re-renders and re-syncs the widgets,
+# and Rocks' timers (useInterval/useTimeout) are fired from a low-frequency
+# GLib timeout tick. Bounded `frames` runs (tests) skip the loop and pump the
+# GLib main context directly.
 
 const DIRTY = Ref(true)
 const RUNNING = Ref(false)
+const DONE = Condition()
+const RENDER_QUEUED = Ref(false)
+const ROOT_FIBER = Ref{Any}(nothing) # Union{Nothing,Fiber}
+const TICK_ID = Ref{Int}(-1)
 
 """
     request_render()
 
-Mark the application dirty so the main loop re-renders and redraws it on the
-next frame. Called by state setters; rarely needed manually (e.g. after
+Mark the application dirty so the main loop re-renders the tree on the next
+idle pass. Called by state setters; rarely needed manually (e.g. after
 mutating a ref).
 """
-request_render() = (DIRTY[] = true; nothing)
+function request_render()
+    DIRTY[] = true
+    if !RENDER_QUEUED[] && RUNNING[] && Gtk4.GLib.is_loop_running()
+        RENDER_QUEUED[] = true
+        Gtk4.g_idle_add() do
+            RENDER_QUEUED[] = false
+            process_dirty!()
+            return false
+        end
+    end
+    return nothing
+end
 
 """
     quit!()
@@ -21,11 +42,58 @@ button.
 """
 function quit!()
     RUNNING[] = false
-    request_render()
+    notify(DONE)
     return nothing
 end
 
-# Create the root fiber for `run`. `kw` is the keyword arguments as a
+# One render pass: fire due timers, then re-render and re-sync the widgets
+# when the tree is dirty. Runs on the GLib loop task in interactive mode and
+# on the caller's task in bounded frames mode.
+function process_dirty!()
+    fire_timers!()
+    DIRTY[] || return
+    DIRTY[] = false
+    root = ROOT_FIBER[]
+    root === nothing && return
+    perform_render!(root)
+    run_effects!()
+    sync_backend!(root)
+    return nothing
+end
+
+# A repeating tick that fires Rocks' timers while the GLib loop idles.
+function install_tick!()
+    TICK_ID[] >= 0 && return
+    TICK_ID[] = Gtk4.g_timeout_add(function ()
+        fire_timers!()
+        return true # repeat
+    end, 16)
+    return nothing
+end
+
+function uninstall_tick!()
+    TICK_ID[] >= 0 || return
+    Gtk4.GLib.g_source_remove(TICK_ID[])
+    TICK_ID[] = -1
+    return nothing
+end
+
+"""
+    pump(n = 1)
+
+Process pending GLib events `n` times without blocking. Used by bounded
+`frames` runs to realize, map and lay out windows (and to drive tests) with
+the main loop not running.
+"""
+function pump(n::Integer = 1)
+    for _ in 1:n
+        ccall((:g_main_context_iteration, Gtk4.GLib.libglib), Cint,
+              (Ptr{Cvoid}, Cint), C_NULL, 0)
+    end
+    return nothing
+end
+
+# Create the root fiber for `render`. `kw` is the keyword arguments as a
 # NamedTuple.
 function create_root(target::Function, kw::NamedTuple)
     props = props_dict(; kw...)
@@ -40,28 +108,14 @@ function create_root(target::Element, kw::NamedTuple)
     return Fiber(target.kind, props, nothing)
 end
 
-# Milliseconds to block waiting for the next event: bounded by the time until
-# the next due timer (so timers stay accurate) and capped, so the loop keeps
-# progressing even if a platform never delivers events.
-function event_wait_timeout_ms()
-    timeout = 250
-    for timer in TIMERS
-        timer.active || continue
-        delta = Int(timer.due) - Int(time_ns())
-        delta <= 0 && return 0
-        timeout = min(timeout, Int(ceil(delta / 1e6)))
-    end
-    return timeout
-end
-
 """
     render(app; kwargs...)
 
-Run the application until all windows are closed (or [`quit!`](@ref) is
+Run the application until all its windows are closed (or [`quit!`](@ref) is
 called). `app` is either
 
-* a component function, called with `kwargs` as props on every re-render —
-  this is the recommended form, since it re-runs on state updates:
+* a component function, called with the remaining `kwargs` as props on every
+  re-render — the recommended form, since it re-runs on state updates:
 
   ```julia
   function App()
@@ -70,7 +124,7 @@ called). `app` is either
 
   render(App)
   render() do
-      @rock Window(@rock Text("Hello"))
+      @rock Window(@rock Label("Hello"))
   end
   ```
 
@@ -78,29 +132,26 @@ called). `app` is either
   inside it still re-run on state updates):
 
   ```julia
-  render(@rock Window(@rock Text("Hello")))
+  render(@rock Window(@rock Label("Hello")))
   ```
 
-The render loop: block until an event arrives or a timer is due → dispatch
-events, fire due timers → if dirty, re-render the tree (component functions
-re-run, fibers are reconciled), run pending effects and lay out → redraw the
-windows that need it: after a render pass, when the window manager exposed
-them (covered, restored), after a resize, or on hover/press styling changes.
-An idle application neither redraws nor burns CPU.
+The GLib main loop delivers input events and repaints; Rocks re-renders the
+fiber tree (component functions re-run, fibers are reconciled, props are
+re-applied to the widgets) whenever application state changes. Idle
+applications neither re-render nor burn CPU.
 
 Two keyword arguments control the runtime itself instead of being passed as
-props: `frames = N` stops the loop after `N` frames (each frame blocks for
-up to ~250ms waiting for events), and `screenshot = path` captures the first
-window into a PNG file right before the application shuts down. Together
-they enable fully headless runs — no window is ever shown, but
-[`screenshot`](@ref) still captures real pixels (with
-`SDL_VIDEODRIVER=dummy`):
+props: `frames = N` runs the loop for `N` bounded, synchronous iterations
+(realizing and laying out windows through the GLib main context, without the
+background loop task) and then returns — and `screenshot = path` captures the
+first window into a PNG right before the application shuts down. Together
+they are how tests run against a real display:
 
 ```julia
 render(App; frames = 3, screenshot = "app.png")
 ```
 
-Note: like `ReactDOM.render`. `Rocks.run` is available as a qualified alias
+Note: like `ReactDOM.render`, `Rocks.run` is available as a qualified alias
 if you prefer React's naming (`using Rocks` makes plain `run` ambiguous with
 `Base.run`).
 """
@@ -108,78 +159,46 @@ function render(app; kwargs...)
     RUNNING[] && error("Rocks.render is already running")
     RUNNING[] = true
     DIRTY[] = true
+    RENDER_QUEUED[] = false
     init_backend()
     kw = values(kwargs)
     frames = get(kw, :frames, nothing)
     shot = get(kw, :screenshot, nothing)
     kw = Base.structdiff(kw, (frames = nothing, screenshot = nothing))
     root = create_root(app, kw)
+    ROOT_FIBER[] = root
     root.mounted = true
+    started_loop = false
     try
         perform_render!(root)
         run_effects!()
-        event = Ref{SDL_Event}()
-        windows = Fiber[]
-        frame = 0
-        while RUNNING[]
-            # Block until the next event or until the next timer is due, so
-            # an idle application neither redraws nor burns CPU.
-            if SDL_WaitEventTimeout(event, event_wait_timeout_ms()) == 1
-                dispatch_event!(event[])
-                while SDL_PollEvent(event) == 1
-                    dispatch_event!(event[])
-                end
+        sync_backend!(root)
+        if frames isa Integer
+            # Bounded, synchronous runs: realize, map and lay out the windows
+            # by pumping the GLib main context, then dispatch and render.
+            wait_windows_mapped!(root)
+            for _ in 1:frames
+                RUNNING[] || break
+                pump(10)
+                process_dirty!()
             end
-            fire_timers!()
-            if DIRTY[]
-                DIRTY[] = false
-                # Rendering (component functions, reconciliation, effects,
-                # layout) only happens when the application is dirty.
-                perform_render!(root)
-                run_effects!()
-                empty!(windows)
-                collect_windows!(windows, root)
-                for w in windows
-                    w.host isa WindowState || create_window!(w)
-                    sync_window!(w)
-                end
-                for w in windows
-                    measure!(w)
-                    place!(w, 0.0, 0.0)
-                end
-                for w in windows
-                    w.host isa WindowState && (w.host.needs_draw = true)
-                end
+        else
+            install_tick!()
+            Gtk4.GLib.start_main_loop(true)
+            started_loop = true
+            while RUNNING[]
+                wait(DONE)
             end
-            # Resized windows are re-laid out without re-running components.
-            for w in windows
-                state = w.host
-                state isa WindowState || continue
-                state.needs_layout || continue
-                state.needs_layout = false
-                measure!(w)
-                place!(w, 0.0, 0.0)
-            end
-            # Drawing is event-driven: redraw only the windows that need it —
-            # after a render pass, when the window manager exposed them
-            # (uncovered, restored), after a resize, or on hover/press styling
-            # changes.
-            for w in windows
-                state = w.host
-                state isa WindowState || continue
-                state.needs_draw || continue
-                state.needs_draw = false
-                w.hidden || draw_window!(w)
-            end
-            frame += 1
-            frames isa Integer && frame >= frames && (RUNNING[] = false)
         end
-        # Semi-headless runs: capture before the windows are torn down.
+        # Capture before the windows are torn down.
         shot !== nothing && screenshot(root, String(shot))
     finally
+        started_loop && Gtk4.GLib.stop_main_loop(true)
+        uninstall_tick!()
         unmount!(root)
         RUNNING[] = false
-        shutdown_backend()
+        ROOT_FIBER[] = nothing
+        RENDER_QUEUED[] = false
         empty!(TIMERS)
         empty!(PENDING_EFFECTS)
         CURRENT_FIBER[] = nothing
