@@ -26,8 +26,8 @@ function Badge(; count = nothing, dot = false, child = nothing, children = Any[]
             @rock Text(string(count); size = t.typescale.label_small,
                        color = t.on_error);
             height = 16, radius = 8,
-            padding = 4, background = t.error,
-            direction = :row, align = :center)
+            padding_x = 4, padding_y = 0, background = t.error,
+            direction = :row, align = :center, justify = :center)
     end
     child === nothing && return marker
     return @rock Box(

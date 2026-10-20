@@ -16,6 +16,7 @@ abstract type HostKind end
 
 struct _WindowKind <: HostKind end
 struct _BoxKind <: HostKind end
+struct _ScrollViewKind <: HostKind end
 struct _TextKind <: HostKind end
 struct _PressableKind <: HostKind end
 struct _ImageKind <: HostKind end
@@ -58,12 +59,50 @@ Host element kind for a rectangular layout container. Boxes draw an optional
 background/border and lay their children out in a column (default) or a row.
 See [`Row`](@ref)/[`Column`](@ref) for convenient wrappers.
 
-Props: `background`, `border_color`, `border_width`, `direction` (`:column`
-or `:row`), `gap`, `padding`, `align` (`:start`, `:center` or `:end` along
-the cross axis), `width`, `height`, and `position = :absolute` with `x`/`y`
-to place a child manually instead of flowing it.
+Props: `background`, `border_color`, `border_width`, `radius`, `direction`
+(`:column` or `:row`), `gap`, `padding`, `align` (`:start`, `:center` or
+`:end` along the cross axis), `justify` (the same values along the main
+axis), `width`, `height`, and `position = :absolute` with `x`/`y` to place a
+child manually instead of flowing it. Absolute children use `anchor`
+(`:top_left` by default, or `:center`, `:bottom`, `:top_right`,
+`:bottom_left`, `:bottom_right`) to pick the pinned corner/edge; `align`
+remains content alignment inside the child.
+
+`scroll = true` (or `:vertical` / `:horizontal`) turns the Box into a scroll
+container: its flow content is clipped to the Box and the mouse wheel scrolls
+the nearest scroll container under the pointer. `scroll_step` sets the pixels
+per wheel notch (default 48) and `on_scroll(offset)` fires when the offset
+changes. See [`ScrollView`](@ref) for a named wrapper.
 """
 const Box = _BoxKind()
+
+"""
+    ScrollView
+
+Host element kind for a scrollable container. It lays out and draws like a
+[`Box`](@ref) but clips its flow content to its viewport and lets the mouse
+wheel scroll it. `direction = :column` (default) scrolls vertically;
+`direction = :row` scrolls horizontally. `scroll_step` sets the pixels per
+wheel notch (default 48), and `on_scroll(offset)` is called with the new pixel
+offset whenever it changes.
+
+A ScrollView must have a bounded size to be useful: pass `width`/`height`, or
+`position = :absolute` with `fill = true` to fill its parent. Absolute
+children are pinned to the viewport rather than scrolling with the content.
+Use a spacer box at the start of the content (or padding) to keep the first
+items clear of a fixed header.
+
+```julia
+@rock ScrollView(
+    @rock Column(
+        @rock Box(; height = 48),  # clear the 64px app bar (+ gaps)
+        cards...;
+        gap = 16, fill = true);
+    position = :absolute, fill = true, padding = 16,
+    on_scroll = offset -> scrolled[] = offset > 0)
+```
+"""
+const ScrollView = _ScrollViewKind()
 
 """
     Text
@@ -137,6 +176,7 @@ const Slider = _SliderKind()
 # Internal aliases used throughout the implementation.
 const _WINDOW = Window
 const _BOX = Box
+const _SCROLLVIEW = ScrollView
 const _TEXT = Text
 const _PRESSABLE = Pressable
 const _IMAGE = Image

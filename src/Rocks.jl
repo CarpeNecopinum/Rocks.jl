@@ -56,7 +56,7 @@ include("mechanics.jl")
 include(joinpath("Material3", "Material3.jl"))
 
 export @rock, @use, render, quit!, screenshot,
-       Window, Box, Text, Pressable, Row, Column,
+       Window, Box, Text, Pressable, Row, Column, ScrollView,
        Image, Split, Slider,
        Button, Checkbox, Toggle, RadioGroup, DropDownMenu, Tabber, ProgressBar,
        createContext, Context,

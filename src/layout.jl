@@ -9,7 +9,58 @@
 
 const _ABSOLUTE = :absolute
 
-padding_of(fiber) = float(get(fiber.props, :padding, 0))
+"""
+Scroll position of a scrollable [`Box`](@ref). `offset` is measured in pixels
+from the start of the content; `max_offset` is recomputed on every layout
+from the content and viewport extents.
+"""
+mutable struct ScrollState
+    offset::Float64
+    max_offset::Float64
+    content_extent::Float64
+    viewport_extent::Float64
+end
+
+# A ScrollView always scrolls (its `direction` selects the axis); a Box
+# becomes scrollable when `scroll = true` (vertical) or `:vertical` /
+# `:horizontal` is given explicitly.
+function scroll_direction(fiber)
+    if fiber.kind === _SCROLLVIEW
+        s = get(fiber.props, :scroll, nothing)
+        (s === :horizontal || s === :row) && return :horizontal
+        s === :vertical && return :vertical
+        return Symbol(get(fiber.props, :direction, :column)) === :row ?
+               :horizontal : :vertical
+    end
+    fiber.kind === _BOX || return nothing
+    s = get(fiber.props, :scroll, false)
+    (s === false || s === nothing) && return nothing
+    s === true && return :vertical
+    d = Symbol(s)
+    (d === :vertical || d === :horizontal) && return d
+    return nothing
+end
+
+is_scrollable(fiber) = scroll_direction(fiber) !== nothing
+
+function scroll_state!(fiber)
+    state = fiber.host
+    state isa ScrollState && return state
+    state = ScrollState(0.0, 0.0, 0.0, 0.0)
+    fiber.host = state
+    return state
+end
+
+# Padding is `(horizontal, vertical)`. `padding` may be a scalar (both axes)
+# or a 2-tuple; `padding_x`/`padding_y` override either axis.
+function padding_of(fiber)
+    p = get(fiber.props, :padding, 0)
+    px, py = p isa Tuple && length(p) == 2 ?
+             (float(p[1]), float(p[2])) : (float(p), float(p))
+    px = float(get(fiber.props, :padding_x, px))
+    py = float(get(fiber.props, :padding_y, py))
+    return (px, py)
+end
 
 is_absolute_child(fiber) = Symbol(get(fiber.props, :position, :relative)) === _ABSOLUTE
 
@@ -68,10 +119,15 @@ function measure!(fiber)
     for child in fiber.children
         is_absolute_child(child) || continue
         if get(child.props, :fill, false)
-            # fill children measure their subtree, then stretch to the
-            # parent's current size (windows use the real OS size)
+            # Fill children measure their subtree, then stretch to the
+            # parent's current size (windows use the real OS size). An
+            # explicit width/height still wins, which lets an absolute
+            # full-width app bar keep its 64px height.
             measure!(child)
-            child.measured = (w, h)
+            fw = get(child.props, :width, nothing)
+            fh = get(child.props, :height, nothing)
+            child.measured = (fw === nothing ? w : float(fw),
+                              fh === nothing ? h : float(fh))
         else
             measure!(child)
         end
@@ -85,11 +141,11 @@ function measure!(fiber)
 end
 
 function measure_box(fiber)
-    p = padding_of(fiber)
+    px, py = padding_of(fiber)
     dir = Symbol(get(fiber.props, :direction, :column))
     gap = float(get(fiber.props, :gap, 0))
     kids = collect(flow_children(fiber))
-    main, cross = 2p, 0.0
+    main, cross = dir === :column ? 2py : 2px, 0.0
     # Regular children first: they determine the cross size that `fill`
     # children stretch across.
     for child in kids
@@ -110,7 +166,7 @@ function measure_box(fiber)
         end
     end
     main += gap * max(length(kids) - 1, 0)
-    return dir === :column ? (cross + 2p, main) : (main, cross + 2p)
+    return dir === :column ? (cross + 2px, main) : (main, cross + 2py)
 end
 
 function measure_text(fiber)
@@ -119,14 +175,19 @@ function measure_text(fiber)
     size, _, fontpath = text_props(fiber)
     font = load_font(fontpath, max(round(Int, size), 1))
     lines = split(content, '\n'; keepempty = true)
-    lineheight = Float64(TTF_FontHeight(font))
-    w = 0.0
+    widths, heights = Float64[], Float64[]
     for line in lines
-        w_ref, _ = Ref{Cint}(0), Ref{Cint}(0)
-        TTF_SizeUTF8(font, String(line), w_ref, Ref{Cint}(0))
-        w = max(w, Float64(w_ref[]))
+        w_ref, h_ref = Ref{Cint}(0), Ref{Cint}(0)
+        TTF_SizeUTF8(font, String(line), w_ref, h_ref)
+        push!(widths, Float64(w_ref[]))
+        push!(heights, Float64(h_ref[]))
     end
-    return (w, lineheight * length(lines))
+    # Some glyphs (descenders, symbols) render one pixel taller than
+    # TTF_FontHeight. Advance by the taller of the line skip and the tallest
+    # line so textures are never squashed into a shorter destination rect.
+    advance = max(Float64(TTF_FontLineSkip(font)), maximum(heights; init = 0.0))
+    h = advance * (length(lines) - 1) + heights[end]
+    return (maximum(widths; init = 0.0), h)
 end
 
 """
@@ -144,7 +205,8 @@ function place!(fiber, x, y)
         gap = float(get(fiber.props, :gap, 0))
         p = padding_of(fiber)
         align = Symbol(get(fiber.props, :align, :start))
-        place_flow!(fiber, dir, gap, p, align, x, y, w, h)
+        justify = Symbol(get(fiber.props, :justify, :start))
+        place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h)
         return
     end
     if is_text(fiber)
@@ -163,11 +225,22 @@ function place!(fiber, x, y)
         gap = float(get(fiber.props, :gap, 0))
         p = padding_of(fiber)
         align = Symbol(get(fiber.props, :align, :start))
-        place_flow!(fiber, dir, gap, p, align, x, y, w, h)
+        justify = Symbol(get(fiber.props, :justify, :start))
+        if is_scrollable(fiber)
+            place_scroll!(fiber, dir, gap, p, align, justify, x, y, w, h)
+        else
+            place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h)
+        end
     else
-        # Component fibers lay their output out like a gap-less column.
+        # Component fibers lay their output out like a gap-less column. A
+        # `fill` child stretches to the component's (possibly constrained)
+        # width, so a component that returns a host box can fill the space its
+        # parent allocated (e.g. a pinned TopAppBar component).
         cy = y
         for child in flow_children(fiber)
+            if get(child.props, :fill, false)
+                child.measured = (w, child.measured[2])
+            end
             place!(child, x, cy)
             cy += child.measured[2]
         end
@@ -262,12 +335,47 @@ function measure_image(fiber)
     return (nw, nh)
 end
 
-function place_flow!(fiber, dir, gap, p, align, x, y, w, h)
-    cx0, cy0 = x + p, y + p
-    content_w, content_h = max(w - 2p, 0.0), max(h - 2p, 0.0)
+# Scrollable boxes lay their flow content out like a normal Box, then shift
+# it opposite the scroll offset. The offset is stored on the fiber and clamped
+# whenever the content or viewport size changes. Absolute children stay
+# pinned to the viewport.
+function place_scroll!(fiber, dir, gap, p, align, justify, x, y, w, h)
+    state = scroll_state!(fiber)
+    px, py = p
+    kids = collect(flow_children(fiber))
+    main = sum(child -> dir === :column ? child.measured[2] : child.measured[1],
+               kids; init = 0.0) + gap * max(length(kids) - 1, 0)
+    extent = main + 2 * (dir === :column ? py : px)
+    viewport = dir === :column ? h : w
+    state.content_extent = extent
+    state.viewport_extent = viewport
+    state.max_offset = max(extent - viewport, 0.0)
+    state.offset = clamp(state.offset, 0.0, state.max_offset)
+    offset_x = dir === :horizontal ? state.offset : 0.0
+    offset_y = dir === :column ? state.offset : 0.0
+    place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h;
+                offset_x = offset_x, offset_y = offset_y)
+    return nothing
+end
+
+function place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h;
+                     offset_x = 0.0, offset_y = 0.0)
+    px, py = p
+    cx0, cy0 = x + px - offset_x, y + py - offset_y
+    content_w, content_h = max(w - 2px, 0.0), max(h - 2py, 0.0)
+    kids = collect(flow_children(fiber))
     if dir === :column
-        cy = cy0
-        for child in flow_children(fiber)
+        main = sum(child -> child.measured[2], kids; init = 0.0) +
+               gap * max(length(kids) - 1, 0)
+        cy = cy0 + (justify === :center ? (content_h - main) / 2 :
+                    justify === :end ? content_h - main : 0.0)
+        for child in kids
+            # `fill` stretches across the parent's content box even when the
+            # parent's size was fixed/filled after measurement (e.g. a
+            # ScrollView content column matching the viewport width).
+            if get(child.props, :fill, false)
+                child.measured = (content_w, child.measured[2])
+            end
             cw = child.measured[1]
             cxx = align === :center ? cx0 + (content_w - cw) / 2 :
                   align === :end ? cx0 + content_w - cw : cx0
@@ -275,8 +383,14 @@ function place_flow!(fiber, dir, gap, p, align, x, y, w, h)
             cy += child.measured[2] + gap
         end
     else
-        cx = cx0
-        for child in flow_children(fiber)
+        main = sum(child -> child.measured[1], kids; init = 0.0) +
+               gap * max(length(kids) - 1, 0)
+        cx = cx0 + (justify === :center ? (content_w - main) / 2 :
+                    justify === :end ? content_w - main : 0.0)
+        for child in kids
+            if get(child.props, :fill, false)
+                child.measured = (child.measured[1], content_h)
+            end
             ch = child.measured[2]
             cyy = align === :center ? cy0 + (content_h - ch) / 2 :
                   align === :end ? cy0 + content_h - ch : cy0
@@ -293,7 +407,11 @@ function place_flow!(fiber, dir, gap, p, align, x, y, w, h)
     for child in fiber.children
         is_absolute_child(child) || continue
         cw, ch = child.measured
-        calign = Symbol(get(child.props, :align, :top_left))
+        # `anchor` controls where the child is pinned; `align` is content
+        # alignment inside the child. Fall back to `align` for older children
+        # that predate the separate anchor prop.
+        calign = Symbol(get(child.props, :anchor,
+                            get(child.props, :align, :top_left)))
         dx = float(get(child.props, :x, 0))
         dy = float(get(child.props, :y, 0))
         if calign === :center

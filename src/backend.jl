@@ -137,6 +137,8 @@ mutable struct TextState
     renderer::Ptr{SDL_Renderer}
     textures::Vector{Ptr{SDL_Texture}}
     linewidths::Vector{Float64}
+    lineheights::Vector{Float64}
+    advance::Float64 # baseline-to-baseline distance for multi-line text
 end
 
 mutable struct PressState
@@ -331,83 +333,161 @@ end
 
 # ---- rounded-rect geometry (SDL_RenderGeometry) ---------------------------
 
+# SDL_RenderGeometry rasterizes triangles without multisampling, so curved
+# edges are aliased. Shapes are drawn with a one-pixel fringe whose vertex
+# alpha ramps from 1 just inside the boundary to 0 just outside it: this
+# approximates pixel coverage and antialiases fills and outlines.
+const AA_HALF_WIDTH = 0.5
+
+# Segments per 90° corner, chosen so the polygon stays within a fraction of a
+# pixel of the true arc even for large radii.
+round_rect_segments(r) =
+    r <= 0 ? 1 : clamp(ceil(Int, 2.5 * sqrt(r)), 6, 64)
+
+# Radii of the four corners, clockwise from the top left. A scalar radius
+# applies to every corner; a 4-tuple `(top_left, top_right, bottom_right,
+# bottom_left)` allows partially rounded shapes (e.g. segmented buttons).
+function corner_radii(r, w, h)
+    maxr = min(w, h) / 2
+    vals = r isa Tuple || r isa AbstractVector ? r : (r, r, r, r)
+    length(vals) == 4 ||
+        error("radius must be a number or 4 corner radii, got: $r")
+    return ntuple(i -> clamp(float(vals[i]), 0.0, maxr), 4)
+end
+
+has_radius(r) = r isa Tuple || r isa AbstractVector ?
+                any(x -> float(x) > 0, r) : float(r) > 0
+
+# Shrink corner radii by `d` (for an inset fill inside a border).
+inset_radius(r, d) = r isa Tuple || r isa AbstractVector ?
+    ntuple(i -> max(float(r[i]) - d, 0.0), 4) :
+    max(float(r) - d, 0.0)
+
 # Boundary points of a rounded rectangle, clockwise in screen space, with `n`
 # segments per corner. With `r = min(w, h) / 2` this traces a circle.
 function round_rect_points(x, y, w, h, r, n)
+    return round_rect_points(x, y, w, h, (r, r, r, r), n)
+end
+
+function round_rect_points(x, y, w, h, r::NTuple{4,<:Real}, n)
     pts = Vector{SDL_FPoint}()
     sizehint!(pts, 4 * (n + 1))
-    for (cx, cy, a0) in (
-        (x + w - r, y + r, -pi / 2),   # top-right: up → right
-        (x + w - r, y + h - r, 0.0),   # bottom-right: right → down
-        (x + r, y + h - r, pi / 2),    # bottom-left: down → left
-        (x + r, y + r, pi),            # top-left: left → up
+    for (cx, cy, a0, cr) in (
+        (x + w - r[2], y + r[2], -pi / 2, r[2]),   # top-right: up → right
+        (x + w - r[3], y + h - r[3], 0.0, r[3]),   # bottom-right: right → down
+        (x + r[4], y + h - r[4], pi / 2, r[4]),    # bottom-left: down → left
+        (x + r[1], y + r[1], pi, r[1]),            # top-left: left → up
     )
         for i in 0:n
             a = a0 + (i / n) * (pi / 2)
-            push!(pts, SDL_FPoint(cx + r * cos(a), cy + r * sin(a)))
+            push!(pts, SDL_FPoint(cx + cr * cos(a), cy + cr * sin(a)))
         end
     end
     return pts
 end
 
-# One SDL_Color per vertex of a geometry batch.
-geometry_color(color) = begin
+# One SDL_Color per vertex of a geometry batch, scaled by `coverage` (0..1).
+geometry_color(color, coverage = 1.0) = begin
     r, g, b, a = _to_rgba(color)
-    SDL_Color(r, g, b, a)
+    alpha = round(UInt8, clamp(coverage, 0.0, 1.0) * a)
+    SDL_Color(r, g, b, alpha)
+end
+
+geometry_vertex(p, color) = SDL_Vertex(p, color, SDL_FPoint(0, 0))
+
+# Append the triangles of a band between two equal-length rims. The first
+# rim (`a`) is at the inside of the band and carries the shape color; the
+# second (`b`) is at the outside and fades to transparent.
+function push_rim_band!(indices, m, a0, b0)
+    for i in 1:m
+        j = i % m + 1
+        ai, aj = Cint(a0 + i - 1), Cint(a0 + j - 1)
+        bi, bj = Cint(b0 + i - 1), Cint(b0 + j - 1)
+        push!(indices, ai, bi, aj)
+        push!(indices, aj, bi, bj)
+    end
+    return indices
 end
 
 """
     fill_round_rect(renderer, x, y, w, h, r, color)
 
-Fill a rounded rectangle with `color` using `SDL_RenderGeometry` — a triangle
-fan from the rect center to the boundary points. With `r = min(w, h) / 2` this
-fills a circle. Degenerate (`r <= 0`) falls back to `fill_rect`.
+Fill an antialiased rounded rectangle with `color` using
+`SDL_RenderGeometry`. With `r = min(w, h) / 2` this fills a circle.
+Degenerate (`r <= 0`) falls back to `fill_rect` (axis-aligned rectangles do
+not need antialiasing).
 """
 function fill_round_rect(renderer, x, y, w, h, r, color)
     (w <= 0 || h <= 0) && return
-    r = clamp(r, 0.0, min(w, h) / 2)
-    r <= 0 && return (set_color(renderer, color); fill_rect(renderer, x, y, w, h))
-    n = 6
-    rim = round_rect_points(x, y, w, h, r, n)
-    m = length(rim)
+    radii = corner_radii(r, w, h)
+    maximum(radii) <= 0 &&
+        return (set_color(renderer, color); fill_rect(renderer, x, y, w, h))
+    t = min(AA_HALF_WIDTH, w / 2, h / 2)
+    n = round_rect_segments(maximum(radii) + t)
+    inner = round_rect_points(
+        x + t, y + t, max(w - 2t, 0.0), max(h - 2t, 0.0),
+        ntuple(i -> max(radii[i] - t, 0.0), 4), n)
+    outer = round_rect_points(
+        x - t, y - t, w + 2t, h + 2t, ntuple(i -> radii[i] + t, 4), n)
+    m = length(inner)
     c = geometry_color(color)
-    vertices = Vector{SDL_Vertex}(undef, m + 1)
-    vertices[1] = SDL_Vertex(SDL_FPoint(x + w / 2, y + h / 2), c, SDL_FPoint(0, 0))
-    for (i, p) in enumerate(rim)
-        vertices[i + 1] = SDL_Vertex(p, c, SDL_FPoint(0, 0))
+    c0 = geometry_color(color, 0.0)
+    vertices = Vector{SDL_Vertex}(undef, 2m + 1)
+    vertices[1] = geometry_vertex(
+        SDL_FPoint(x + w / 2, y + h / 2), c)
+    for i in 1:m
+        vertices[i + 1] = geometry_vertex(inner[i], c)
+        vertices[m + i + 1] = geometry_vertex(outer[i], c0)
     end
     indices = Cint[]
-    sizehint!(indices, 3m)
+    sizehint!(indices, 9m)
     for i in 1:m
-        push!(indices, Cint(0), Cint(i), Cint(i % m + 1))
+        j = i % m + 1
+        # solid interior fan, then the antialiasing fringe
+        push!(indices, Cint(0), Cint(i), Cint(j))
     end
+    push_rim_band!(indices, m, 1, m + 1)
     SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
     return nothing
 end
 
-# Fill the ring between two rounded rectangles (a rounded border). The inner
-# rim is inset by `bw` from the outer one.
+# Fill the ring between two rounded rectangles (a rounded border). Both the
+# outer and the inner (hole) edges are antialiased.
 function ring_round_rect(renderer, x, y, w, h, r, bw, color)
     (w <= 0 || h <= 0 || bw <= 0) && return
-    r = clamp(r, 0.0, min(w, h) / 2)
-    bw = min(bw, w / 2, h / 2, r)
-    n = 6
-    outer = round_rect_points(x, y, w, h, r, n)
-    inner = round_rect_points(x + bw, y + bw, w - 2bw, h - 2bw, max(r - bw, 0.0), n)
-    m = length(outer)
+    radii = corner_radii(r, w, h)
+    bw = min(bw, w / 2, h / 2)
+    bw <= 0 && return
+    t = min(AA_HALF_WIDTH, bw / 2, w / 2, h / 2)
+    n = round_rect_segments(maximum(radii) + t)
+    iw, ih = max(w - 2bw, 0.0), max(h - 2bw, 0.0)
+    ir = ntuple(i -> max(radii[i] - bw, 0.0), 4)
+    outer_in = round_rect_points(
+        x + t, y + t, max(w - 2t, 0.0), max(h - 2t, 0.0),
+        ntuple(i -> max(radii[i] - t, 0.0), 4), n)
+    outer_out = round_rect_points(
+        x - t, y - t, w + 2t, h + 2t, ntuple(i -> radii[i] + t, 4), n)
+    inner_out = round_rect_points(
+        x + bw - t, y + bw - t, iw + 2t, ih + 2t,
+        ntuple(i -> ir[i] + t, 4), n)
+    inner_in = round_rect_points(
+        x + bw + t, y + bw + t, max(iw - 2t, 0.0), max(ih - 2t, 0.0),
+        ntuple(i -> max(ir[i] - t, 0.0), 4), n)
+    m = length(outer_in)
     c = geometry_color(color)
-    vertices = Vector{SDL_Vertex}(undef, 2m)
+    c0 = geometry_color(color, 0.0)
+    vertices = Vector{SDL_Vertex}(undef, 4m)
     for i in 1:m
-        vertices[i] = SDL_Vertex(outer[i], c, SDL_FPoint(0, 0))
-        vertices[m + i] = SDL_Vertex(inner[i], c, SDL_FPoint(0, 0))
+        vertices[i] = geometry_vertex(outer_in[i], c)
+        vertices[m + i] = geometry_vertex(outer_out[i], c0)
+        vertices[2m + i] = geometry_vertex(inner_out[i], c)
+        vertices[3m + i] = geometry_vertex(inner_in[i], c0)
     end
     indices = Cint[]
-    sizehint!(indices, 6m)
-    for i in 1:m
-        j = i % m + 1
-        push!(indices, Cint(i - 1), Cint(m + i - 1), Cint(j - 1))
-        push!(indices, Cint(m + i - 1), Cint(m + j - 1), Cint(j - 1))
-    end
+    sizehint!(indices, 18m)
+    push_rim_band!(indices, m, 0, m)      # outer edge fringe
+    push_rim_band!(indices, m, 0, 2m)     # solid border
+    push_rim_band!(indices, m, 2m, 3m)    # inner (hole) edge fringe
     SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
     return nothing
 end
@@ -424,19 +504,23 @@ end
 function draw_background!(fiber, renderer)
     props = fiber.props
     background = background_for(fiber)
-    radius = float(get(props, :radius, 0))
+    radius = get(props, :radius, 0)
     border_color = get(props, :border_color, nothing)
     border_width = float(get(props, :border_width, 0))
     x, y, w, h = fiber.rect
-    if radius > 0
+    if has_radius(radius)
         # Rounded shape: fill and border are drawn as geometry so outlined
-        # containers (no background) keep their interior transparent.
+        # containers (no background) keep their interior transparent. When
+        # there is both a border and a background, paint the whole shape in
+        # the border color and lay the background on top: overlapping two
+        # separate antialiased shapes at the shared inner edge would let the
+        # window background show through the seam.
         if background !== nothing && border_width > 0 && border_color !== nothing
-            ring_round_rect(renderer, x, y, w, h, radius, border_width, border_color)
+            fill_round_rect(renderer, x, y, w, h, radius, border_color)
             fill_round_rect(
                 renderer, x + border_width, y + border_width,
                 max(w - 2border_width, 0.0), max(h - 2border_width, 0.0),
-                max(radius - border_width, 0.0), background)
+                inset_radius(radius, border_width), background)
         elseif background !== nothing
             fill_round_rect(renderer, x, y, w, h, radius, background)
         elseif border_width > 0 && border_color !== nothing
@@ -507,12 +591,14 @@ function ensure_text!(fiber, renderer)
     lines = split(content, '\n'; keepempty = true)
     textures = Ptr{SDL_Texture}[]
     linewidths = Float64[]
+    lineheights = Float64[]
     scolor = SDL_Color(color...)
     for line in lines
         surface = TTF_RenderUTF8_Blended(font, String(line), scolor)
         if surface == C_NULL
             push!(textures, C_NULL)
             push!(linewidths, 0.0)
+            push!(lineheights, 0.0)
             continue
         end
         texture = SDL_CreateTextureFromSurface(renderer, surface)
@@ -521,8 +607,11 @@ function ensure_text!(fiber, renderer)
         SDL_QueryTexture(texture, C_NULL, C_NULL, w_ref, h_ref)
         push!(textures, texture)
         push!(linewidths, Float64(w_ref[]))
+        push!(lineheights, Float64(h_ref[]))
     end
-    fiber.host = TextState(content, color, size, fontpath, renderer, textures, linewidths)
+    advance = max(Float64(TTF_FontLineSkip(font)), maximum(lineheights; init = 0.0))
+    fiber.host = TextState(content, color, size, fontpath, renderer, textures,
+                           linewidths, lineheights, advance)
     return fiber.host
 end
 
@@ -533,6 +622,7 @@ function free_text!(state::TextState)
     end
     empty!(state.textures)
     empty!(state.linewidths)
+    empty!(state.lineheights)
     state.renderer = C_NULL
     return nothing
 end
@@ -628,6 +718,38 @@ end
 
 # ---- the draw pass -------------------------------------------------------
 
+# Intersect an SDL clip rectangle with the previous one.
+function clip_rect(a::SDL_Rect, b::SDL_Rect)
+    x1, y1 = max(a.x, b.x), max(a.y, b.y)
+    x2 = min(a.x + a.w, b.x + b.w)
+    y2 = min(a.y + a.h, b.y + b.h)
+    return SDL_Rect(x1, y1, max(x2 - x1, 0), max(y2 - y1, 0))
+end
+
+# Draw a scroll container's children clipped to its viewport (and to any
+# outer clip, so nested scroll views compose correctly).
+function draw_scrolled!(fiber, renderer)
+    previous = Ref(SDL_Rect(0, 0, 0, 0))
+    had_clip = SDL_RenderIsClipEnabled(renderer) != SDL_FALSE
+    had_clip && SDL_RenderGetClipRect(renderer, previous)
+    x, y, w, h = fiber.rect
+    clip = SDL_Rect(round(Int, x), round(Int, y), round(Int, w), round(Int, h))
+    had_clip && (clip = clip_rect(previous[], clip))
+    if clip.w <= 0 || clip.h <= 0
+        return nothing
+    end
+    SDL_RenderSetClipRect(renderer, Ref(clip))
+    try
+        for child in fiber.children
+            draw!(child, renderer)
+        end
+    finally
+        had_clip ? SDL_RenderSetClipRect(renderer, previous) :
+                   SDL_RenderSetClipRect(renderer, C_NULL)
+    end
+    return nothing
+end
+
 """
     draw!(fiber, renderer)
 
@@ -639,13 +761,12 @@ function draw!(fiber, renderer)
     if is_text(fiber)
         state = ensure_text!(fiber, renderer)
         x, y = fiber.rect[1], fiber.rect[2]
-        font = load_font(state.fontpath, max(round(Int, state.size), 1))
-        lineheight = Float64(TTF_FontHeight(font))
         for (i, texture) in enumerate(state.textures)
             texture == C_NULL && continue
-            w = state.linewidths[i]
-            dst = SDL_Rect(round(Int, x), round(Int, y + (i-1) * lineheight),
-                           round(Int, w), round(Int, lineheight))
+            w, h = state.linewidths[i], state.lineheights[i]
+            (w <= 0 || h <= 0) && continue
+            dst = SDL_Rect(round(Int, x), round(Int, y + (i-1) * state.advance),
+                           round(Int, w), round(Int, h))
             SDL_RenderCopy(renderer, texture, C_NULL, Ref(dst))
         end
         return
@@ -658,11 +779,16 @@ function draw!(fiber, renderer)
         draw_slider!(fiber, renderer)
         return
     end
-    if fiber.kind === _BOX || fiber.kind === _PRESSABLE
+    if fiber.kind === _BOX || fiber.kind === _PRESSABLE ||
+       fiber.kind === _SCROLLVIEW
         draw_background!(fiber, renderer)
     end
-    for child in fiber.children
-        draw!(child, renderer)
+    if is_scrollable(fiber)
+        draw_scrolled!(fiber, renderer)
+    else
+        for child in fiber.children
+            draw!(child, renderer)
+        end
     end
     if fiber.kind === _SPLIT
         draw_split_handle!(fiber, renderer)
@@ -687,6 +813,8 @@ end
 # * `track_height` — the track thickness (the fiber rect may be taller).
 # * `thumb_width > 0` — a gap of this width is cut into the track at the
 #   value position (Material 3 style) instead of a round knob.
+# * `handle_width` / `handle_height` / `handle_color` — a vertical handle
+#   drawn in the gap (Material 3 expressive slider style).
 # * `rounded` — rounded track ends.
 # * `stop_color` — dots drawn at both ends of the track.
 function draw_slider!(fiber, renderer)
@@ -704,16 +832,26 @@ function draw_slider!(fiber, renderer)
     rounded = get(props, :rounded, false)
     thumb_w = float(get(props, :thumb_width, 0))
     stop_color = get(props, :stop_color, nothing)
+    handle_w = float(get(props, :handle_width, 0))
+    handle_h = float(get(props, :handle_height, h))
+    handle_color = get(props, :handle_color, active_color)
     ty = y + (h - track_h) / 2
     draw_track = rounded ?
         (cx, cw, c) -> fill_round_rect(renderer, cx, ty, cw, track_h, track_h / 2, c) :
         (cx, cw, c) -> (set_color(renderer, c); fill_rect(renderer, cx, ty, cw, track_h))
     if thumb_w > 0
-        # Material 3 style: the handle is a gap in the track at the value.
+        # Material 3 style: a gap in the track around the handle at the value.
         gap = min(thumb_w, w)
-        active_end = x + (w - gap) * frac
+        center = x + w * frac
+        active_end = max(center - gap / 2, x)
+        inactive_start = min(center + gap / 2, x + w)
         draw_track(x, max(active_end - x, 0.0), active_color)
-        draw_track(active_end + gap, max(x + w - active_end - gap, 0.0), track_color)
+        draw_track(inactive_start, max(x + w - inactive_start, 0.0), track_color)
+        if handle_w > 0
+            hx = center - handle_w / 2
+            hy = y + (h - handle_h) / 2
+            fill_round_rect(renderer, hx, hy, handle_w, handle_h, handle_w / 2, handle_color)
+        end
     else
         draw_track(x, w, track_color)
         draw_track(x, w * frac, active_color)

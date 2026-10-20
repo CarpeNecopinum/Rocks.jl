@@ -61,8 +61,11 @@ function Button(; on_press = () -> nothing, disabled = false, label = "",
         :radius => radius,
         :height => height,
         :padding => padding,
+        :padding_x => padding,
+        :padding_y => 0,
         :direction => :row,
         :align => :center,
+        :justify => :center,
         :gap => gap,
     )
     width !== nothing && (props[:width] = width)
@@ -115,7 +118,7 @@ function Checkbox(; checked, on_change = () -> nothing, disabled = false,
                 background = on ? checked_background : unchecked_background,
                 border_color = on ? checked_border : unchecked_border,
                 border_width = border_width,
-                direction = :row, align = :center),
+                direction = :row, align = :center, justify = :center),
             label_kid
         ],
     )
@@ -147,6 +150,8 @@ function Switch(; on, on_change = () -> nothing, disabled = false,
         error("Mechanics.Switch needs an `Observable` as its `on` prop")
     is_on = on[]
     thumb_size = is_on ? thumb_on_size : thumb_off_size
+    inset = (track_h - thumb_size) / 2
+    thumb_x = is_on ? track_w - thumb_size - inset : inset
     icon = is_on ? on_icon : off_icon
     thumb_kid = icon == "" ? nothing :
                 (@rock Text(icon; color = icon_color, size = icon_size))
@@ -164,12 +169,13 @@ function Switch(; on, on_change = () -> nothing, disabled = false,
         Any[@rock Box(
             @rock Box(
                 thumb_kid;
-                position = :absolute, align = :center,
+                position = :absolute, anchor = :top_left, x = thumb_x, y = inset,
                 width = thumb_size, height = thumb_size,
                 radius = thumb_size / 2,
                 background = is_on ? on_thumb : off_thumb,
                 border_color = is_on ? on_thumb_border : off_thumb_border,
-                border_width = border_width);
+                border_width = border_width,
+                direction = :row, align = :center, justify = :center);
             width = track_w, height = track_h,
             radius = track_h / 2,
             background = is_on ? on_track : off_track,
@@ -177,7 +183,7 @@ function Switch(; on, on_change = () -> nothing, disabled = false,
             border_width = is_on ?
                            (on_track_border === nothing ? 0 : track_border_width) :
                            (off_track_border === nothing ? 0 : track_border_width),
-            direction = :row, align = :center)],
+            direction = :row, align = :center, justify = :center)],
     )
 end
 
@@ -224,7 +230,7 @@ function Radio(; selected, value, on_change = () -> nothing, disabled = false,
                 radius = size / 2,
                 border_color = is_selected ? selected_ring : unselected_ring,
                 border_width = border_width,
-                direction = :row, align = :center),
+                direction = :row, align = :center, justify = :center),
             label_kid
         ],
     )
@@ -269,8 +275,11 @@ function Chip(; on_press = () -> nothing, selected = nothing, disabled = false,
             :radius => radius,
             :height => height,
             :padding => padding,
+            :padding_x => padding,
+            :padding_y => 0,
             :direction => :row,
             :align => :center,
+            :justify => :center,
             :gap => gap,
         ),
         Any[leading, label_kids..., trailing],
@@ -304,6 +313,16 @@ function Segmented(; selection, multiple = false, disabled = false,
     isempty(opts) &&
         error("Mechanics.Segmented needs options (positional children or `options`)")
     is_selected(i) = multiple ? i in selection[] : selection[] == i
+    # Only the outer corners of the group are rounded; inner segments are
+    # square so a selected middle segment does not turn into a pill.
+    sr = segment_radius isa Tuple || segment_radius isa AbstractVector ?
+         segment_radius : (segment_radius, segment_radius, segment_radius, segment_radius)
+    length(sr) == 4 ||
+        error("segment_radius must be a number or 4 corner radii, got: $segment_radius")
+    segment_corners(i) = length(opts) == 1 ? (sr[1], sr[2], sr[3], sr[4]) :
+        i == 1 ? (sr[1], 0.0, 0.0, sr[4]) :
+        i == length(opts) ? (0.0, sr[2], sr[3], 0.0) :
+        (0.0, 0.0, 0.0, 0.0)
     segments = Element[]
     for (i, option) in enumerate(opts)
         on = is_selected(i)
@@ -328,11 +347,14 @@ function Segmented(; selection, multiple = false, disabled = false,
                 :background => on ? selected_background : nothing,
                 :hover_background => disabled ? nothing : selected_background,
                 :pressed_background => disabled ? nothing : selected_background,
-                :radius => segment_radius,
+                :radius => segment_corners(i),
                 :height => height,
                 :padding => padding,
+                :padding_x => padding,
+                :padding_y => 0,
                 :direction => :row,
                 :align => :center,
+                :justify => :center,
                 :gap => 8,
             ),
             Any[
@@ -422,6 +444,8 @@ function TextField(; text, on_submit = () -> nothing, disabled = false,
             :width => width,
             :height => height,
             :padding => padding,
+            :padding_x => padding,
+            :padding_y => 0,
             :direction => :row,
             :align => :center,
         ),

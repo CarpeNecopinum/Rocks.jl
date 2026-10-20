@@ -54,7 +54,8 @@ function Dialog(; open, icon = nothing, title = "", actions = nothing,
         icon === nothing ? nothing :
         (@rock Box(
             @rock Icon(icon; size = 24, color = t.secondary);
-            width = 24, height = 24, direction = :row, align = :center)),
+            width = 24, height = 24, direction = :row, align = :center,
+            justify = :center)),
         title == "" ? nothing :
         (@rock Text(title; size = t.typescale.headline_small, color = t.on_surface)),
     ]
@@ -121,7 +122,7 @@ function ListItem(; headline = "", supporting = nothing, leading = nothing,
                 text_col,
                 trailing;
                 gap = 16, align = :center);
-            on_press = on_press, padding = 16, height = height,
+            on_press = on_press, padding_x = 16, padding_y = 0, height = height,
             hover_background = overlay(t.on_surface, 0.08), align = :center),
         Divider();
         gap = 0)

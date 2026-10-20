@@ -10,6 +10,25 @@ tags: plan, material3, theming, components
 **Status: DONE (2026-10-19).** Everything below was implemented; the deferred
 list at the bottom is the remaining future work.
 
+**Post-review fixes (2026-10-20):** antialiased rounded geometry (1px alpha
+fringe), per-corner radii (segmented outer corners), text drawn at its natural
+texture height (descenders were being squashed), per-axis padding +
+main-axis `justify` (button/icon centering), M3 switch thumb travel, and the
+M3 slider handle bar. Follow-up: themed positional button labels, and an
+`anchor` prop so absolutely positioned switch thumbs can still center their
+content.
+
+**Scrolling + app-bar reaction (2026-10-20):** added the `ScrollView` host
+kind (and `Box(scroll = ...)`) with clipped viewports, wheel dispatch to the
+nearest scroll container, persisted/clamped offsets, and `on_scroll`.
+`TopAppBar` accepts `scrolled` (Bool or `Observable{Bool}`) and switches from
+`surface` to `surfaceContainer`, per the M3 on-scroll fill guidance; the
+showcase pins it over a full-window ScrollView. Absolute `fill` children now
+keep an explicit width/height, and components with a `fill` output stretch it
+to their allocated width, so a pinned app-bar component fills the window
+while staying 64px tall. Tests: 268 passing (including scroll layout, wheel,
+clip pixels, fixed-height fill, and app-bar color).
+
 Goal: implement as much of https://m3.material.io/components as Rocks.jl
 primitives allow, in a `Rocks.Material3` submodule, themed via `createContext`
 with a non-mutable `Theme` struct, with vanilla "mechanics" components in the
@@ -51,14 +70,17 @@ is visually verified via the screenshot infrastructure (headless dummy driver
   glyphs (DejaVu Sans covers ✓ ✕ ☰ ← → ● ○ ▼ …) rendered as `Text`.
 - **Rounded shapes**: M3 is shape-driven; SDL has no rounded-rect primitive,
   so `backend.jl` gains `fill_round_rect` / `ring_round_rect` built on
-  `SDL_RenderGeometry` (center fan / quad strip, 6 segments per corner;
-  `r = min(w, h)/2` draws circles). `Box`/`Pressable` gained a `radius` prop
-  (ring + inset fill keeps outlined containers transparent inside).
+  `SDL_RenderGeometry` (center fan / quad strip, adaptive segments per
+  corner, 1px alpha fringe for antialiasing; `r = min(w, h)/2` draws
+  circles). `Box`/`Pressable` gained a `radius` prop — a number or four
+  corner radii — and ring + inset fill keeps outlined containers transparent
+  inside.
 - **Overlays** (Dialog, Snackbar, Tooltip, modal Drawer): layout.jl absolute
   children gained `fill = true` (measure to the parent's size — scrim) and
-  corner anchors (`align = :top_left/:top_right/:bottom_left/:bottom_right`,
-  x/y as inward offsets), `:center` and `:bottom`. Flow children also fill
-  across the cross axis (`fill = true` in `measure_box`).
+  an `anchor` (`:top_left` default, `:top_right`, `:bottom_left`,
+  `:bottom_right`, `:center`, `:bottom`; x/y as inward offsets). `align`
+  remains content alignment and serves as the legacy anchor fallback. Flow
+  children also fill across the cross axis (`fill = true` in `measure_box`).
 - **Focus** (TextField): events.jl gained a focus concept — a press focuses
   the deepest fiber under it carrying `:on_key`/`:on_text_input` props;
   keyboard and text-input events dispatch to the focused fiber when set,
@@ -111,7 +133,7 @@ is visually verified via the screenshot infrastructure (headless dummy driver
 6. **Tests** — headless: theme context (default, provider, reactivity on
    theme change), per-component structure/state (toggling writes the
    Observable, disabled blocks presses), variant colors from the theme,
-   overlay layout. 233 tests pass. ✓
+   overlay layout. 268 tests pass. ✓
 7. **Docs** — README section, `.agents` skill updates, memory update, this
    plan updated with outcomes. ✓
 

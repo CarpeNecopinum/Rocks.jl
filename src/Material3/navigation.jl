@@ -11,10 +11,10 @@ function destination(t, label, icon, i, selected, on_change, disabled, icon_size
         @rock Icon(icon; size = icon_size, color = icon_color);
         width = 64, height = 32, radius = t.shapes.full,
         background = t.secondary_container,
-        direction = :row, align = :center)) : (@rock Box(
+        direction = :row, align = :center, justify = :center)) : (@rock Box(
         @rock Icon(icon; size = icon_size, color = icon_color);
         width = 64, height = 32, radius = t.shapes.full,
-        direction = :row, align = :center))
+        direction = :row, align = :center, justify = :center))
     return @rock Pressable(
         indicator,
         (@rock Text(label; size = label_size, color = label_color));
@@ -106,7 +106,8 @@ function NavigationDrawer(; selected, on_change = () -> nothing,
         leading = icon === nothing ? nothing :
                   (@rock Box(
                       @rock Icon(icon; size = 24, color = icon_color);
-                      width = 24, height = 24, direction = :row, align = :center))
+                      width = 24, height = 24, direction = :row, align = :center,
+                      justify = :center))
         pill = @rock Pressable(
             @rock Row(
                 leading,
@@ -191,19 +192,41 @@ function Tabs(; selected, on_change = () -> nothing, disabled = false,
 end
 
 """
-    Material3.TopAppBar(title; leading, actions)
+    Material3.TopAppBar(title; leading, actions, scrolled)
 
-A Material 3 (small) top app bar: a 64dp `surface` bar with a
-`titleLarge`-sized title, optional `leading` icon and `actions` row.
+A Material 3 (small) top app bar: a 64dp bar with a `titleLarge`-sized title,
+optional `leading` icon and `actions` row. The bar uses `surface` initially
+and switches to `surfaceContainer` when `scrolled` is `true` (a `Bool` or an
+`Observable{Bool}`), matching the M3 guidance to apply a fill color when
+content scrolls behind the bar. `background` and `scrolled_background`
+override those two colors.
+
+The layout props `position`, `anchor`, `fill`, `x` and `y` apply to the bar
+component itself. To pin it over a [`ScrollView`](@ref), use
+`position = :absolute, fill = true, height = 64` (an explicit height is
+needed so the absolute fill keeps the bar's size) and put the app bar after
+the scroll view in the window's children so it draws on top.
 """
 function TopAppBar(; title = "", leading = nothing, actions = nothing,
-                   height = 64, children = Any[])
+                   height = 64, scrolled = false,
+                   background = nothing, scrolled_background = nothing,
+                   position = :relative, anchor = :top_left, fill = false,
+                   x = 0, y = 0, children = Any[])
     isempty(children) || (title = string(flat_children(children)[1]))
     t = theme()
+    elevated = if scrolled isa Observable
+        (@use scrolled)[]
+    else
+        Bool(scrolled)
+    end
+    bar_background = elevated ?
+        something(scrolled_background, t.surface_container) :
+        something(background, t.surface)
     leading_kid = leading === nothing ? nothing :
                   (@rock Box(
                       @rock Icon(leading; size = 24, color = t.on_surface_variant);
-                      width = 24, height = 24, direction = :row, align = :center))
+                      width = 24, height = 24, direction = :row, align = :center,
+                      justify = :center))
     action_row = actions === nothing ? nothing :
                  (@rock Row(flat_children(actions)...; gap = 4, align = :center))
     return Element(
@@ -211,7 +234,7 @@ function TopAppBar(; title = "", leading = nothing, actions = nothing,
         props_dict(
             :direction => :row, :align => :center, :gap => 12,
             :height => height, :padding => 16,
-            :fill => true, :background => t.surface,
+            :fill => fill, :background => bar_background,
         ),
         Any[
             leading_kid,

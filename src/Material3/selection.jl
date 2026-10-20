@@ -105,8 +105,8 @@ end
     Material3.Slider(; value, min, max, width, stops)
 
 A Material 3 slider: a 16dp rounded track in `surfaceContainerHighest`, the
-active portion in `primary`, a 4dp handle gap at the value and stop
-indicators at both ends. `value` is an `Observable`; dragging writes it.
+active portion in `primary`, a 4dp vertical handle in a gap at the value and
+stop indicators at both ends. `value` is an `Observable`; dragging writes it.
 """
 function Slider(; value, min = 0, max = 1, width = 260, stops = true)
     t = theme()
@@ -114,11 +114,14 @@ function Slider(; value, min = 0, max = 1, width = 260, stops = true)
         _SLIDER,
         props_dict(
             :value => value, :min => min, :max => max,
-            :width => width, :height => 24,
+            :width => width, :height => 44,
             :track_color => t.surface_container_highest,
             :active_color => t.primary,
             :track_height => 16,
-            :thumb_width => 4,
+            :thumb_width => 10,
+            :handle_width => 4,
+            :handle_height => 44,
+            :handle_color => t.primary,
             :rounded => true,
             :stop_color => stops ? t.primary : nothing,
         ),

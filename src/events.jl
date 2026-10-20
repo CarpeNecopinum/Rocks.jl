@@ -13,6 +13,9 @@ const ACTIVE_PRESS = Dict{Tuple{UInt32,UInt8},Fiber}()
 "windowID -> hovered pressable fiber"
 const HOVERED = Dict{UInt32,Fiber}()
 
+"windowID -> last pointer position (wheel events carry no coordinates)"
+const LAST_POINTER = Dict{UInt32,Tuple{Float64,Float64}}()
+
 const HAND_CURSOR = Ref{Ptr{SDL_Cursor}}(C_NULL)
 const ARROW_CURSOR = Ref{Ptr{SDL_Cursor}}(C_NULL)
 
@@ -65,6 +68,45 @@ function mark_window_layout!(fiber)
         f.host.needs_draw = true
     end
     return nothing
+end
+
+# ---- scrolling -----------------------------------------------------------
+
+# Wheel events carry no coordinates, so use the last motion/press position
+# and fall back to SDL's current pointer position.
+function pointer_position(wid)
+    pos = get(LAST_POINTER, wid, nothing)
+    pos !== nothing && return pos
+    x, y = Ref{Cint}(0), Ref{Cint}(0)
+    SDL_GetMouseState(x, y)
+    return (Float64(x[]), Float64(y[]))
+end
+
+"Nearest scrollable ancestor of a hit target, not crossing window boundaries."
+function find_scrollable(target)
+    f = target
+    while f !== nothing
+        is_scrollable(f) && return f
+        is_window(f) && return nothing
+        f = f.parent
+    end
+    return nothing
+end
+
+# Positive SDL wheel deltas scroll up/away; invert them so a conventional
+# wheel-down gesture increases the offset. Returns whether the offset moved.
+function scroll_by!(fiber, dx, dy)
+    dir = scroll_direction(fiber)
+    dir === nothing && return false
+    state = scroll_state!(fiber)
+    delta = dir === :vertical ? -dy : -dx
+    step = float(get(fiber.props, :scroll_step, 48))
+    new = clamp(state.offset + delta * step, 0.0, state.max_offset)
+    new == state.offset && return false
+    state.offset = new
+    callback(fiber.props, :on_scroll, new)
+    mark_window_layout!(fiber)
+    return true
 end
 
 # ---- dragging Splits and Sliders ----------------------------------------
@@ -295,6 +337,7 @@ function dispatch_event!(event::SDL_Event)
         fiber = get(WINDOW_BY_ID, wid, nothing)
         fiber === nothing && return
         mx, my = event.button.x, event.button.y
+        LAST_POINTER[wid] = (Float64(mx), Float64(my))
         target = hit_test(fiber, mx, my)
 
         # Focus follows the press: the nearest fiber handling keyboard events
@@ -340,6 +383,7 @@ function dispatch_event!(event::SDL_Event)
     elseif ty == SDL_MOUSEMOTION
         wid = event.motion.windowID
         mx, my = event.motion.x, event.motion.y
+        LAST_POINTER[wid] = (Float64(mx), Float64(my))
         if ACTIVE_DRAG[] !== nothing
             drag_update!(ACTIVE_DRAG[], mx, my)
             return
@@ -348,6 +392,24 @@ function dispatch_event!(event::SDL_Event)
         fiber === nothing && (set_hover!(wid, nothing); return)
         target = hit_test(fiber, mx, my)
         set_hover!(wid, find_pressable(target))
+    elseif ty == SDL_MOUSEWHEEL
+        wid = event.wheel.windowID
+        fiber = get(WINDOW_BY_ID, wid, nothing)
+        fiber === nothing && return
+        x, y = pointer_position(wid)
+        target = hit_test(fiber, x, y)
+        scroll = find_scrollable(target)
+        scroll === nothing && return
+        dx = Float64(event.wheel.x)
+        dy = Float64(event.wheel.y)
+        if dx == 0.0 && dy == 0.0
+            dx = Float64(event.wheel.preciseX)
+            dy = Float64(event.wheel.preciseY)
+        end
+        if event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
+            dx, dy = -dx, -dy
+        end
+        scroll_by!(scroll, dx, dy)
     elseif ty == SDL_KEYDOWN
         fiber = get(WINDOW_BY_ID, event.key.windowID, nothing)
         fiber === nothing && return

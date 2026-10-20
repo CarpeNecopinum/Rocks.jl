@@ -191,11 +191,25 @@ Akin to React Native, styling is left to the user. Rocks provides primitives:
 
 * **`Window`** — an OS window.
 * **`Box`** — a rectangular container with an optional `background`,
-  `border_color`/`border_width`, that lays out its children in a `:column`
-  (default) or `:row` `direction` with `gap`, `padding` and cross-axis
-  `align` (`:start`, `:center`, `:end`). Fixed `width`/`height` override the
-  natural size; `position = :absolute` with `x`/`y` places a child manually.
-  `Row`/`Column` are convenience components for directional boxes.
+  `border_color`/`border_width` and `radius` (a number, or four corner radii
+  `(top_left, top_right, bottom_right, bottom_left)` for partially rounded
+  shapes), that lays out its children in a `:column` (default) or `:row`
+  `direction` with `gap`, `padding` and cross-axis `align` (`:start`,
+  `:center`, `:end`) plus main-axis `justify` (same values). `padding` is a
+  number or `(horizontal, vertical)`; `padding_x`/`padding_y` override either
+  axis. Fixed `width`/`height` override the natural size;
+  `position = :absolute` with `x`/`y` places a child manually, using `anchor`
+  (`:top_left` default, `:center`, `:bottom`, `:top_right`, `:bottom_left`,
+  `:bottom_right`) as the pinned point. `Row`/`Column` are convenience
+  components for directional boxes. `scroll = true` (or `:vertical` /
+  `:horizontal`) turns a Box into a clipped scroll container; use
+  **`ScrollView`** (below) for a named wrapper.
+* **`ScrollView`** — lays out like a `Box`, but clips its flow content to the
+  viewport and scrolls it with the mouse wheel. `direction = :column` scrolls
+  vertically (default), `:row` horizontally; `scroll_step` sets pixels per
+  notch (default 48) and `on_scroll(offset)` reports the new offset. Give it a
+  bounded size (`width`/`height`, or `position = :absolute, fill = true`).
+  Absolute children stay pinned to the viewport.
 * **`Text`** — stringified children rendered with a TTF font. Props: `size`,
   `color`, `font`. Multi-line text uses `"\\n"`; the default font is
   auto-discovered (or set with `Rocks.set_default_font!(path)`, the
@@ -298,8 +312,30 @@ render(App)
 
 `M3.dark_theme()` / `M3.light_theme()` are the baseline schemes. Components
 read the active theme with `M3.theme()`. Icons are Unicode glyphs from the
-`M3.ICONS` dict (extend it with your own). See
-`examples/material3.jl` for a full tour with a live light/dark switch:
+`M3.ICONS` dict (extend it with your own).
+
+A small top app bar stays pinned over a scrollable page and changes from
+`surface` to `surfaceContainer` once content scrolls behind it, following the
+M3 on-scroll fill guidance:
+
+```julia
+function Page()
+    scrolled = @use Observable(false)
+    @rock Window(
+        @rock ScrollView(
+            @rock Column(
+                @rock Box(; height = 48),  # clear the pinned 64px bar
+                @rock M3.Card(@rock Text("Content"));
+                gap = 16, fill = true);
+            position = :absolute, fill = true, padding = 16,
+            on_scroll = offset -> scrolled[] = offset > 0),
+        @rock M3.TopAppBar("Title"; scrolled = scrolled, height = 64,
+            position = :absolute, fill = true);
+        title = "Page", width = 480, height = 640)
+end
+```
+
+See `examples/material3.jl` for a full tour with a live light/dark switch:
 
 ```shell
 julia --project examples/material3.jl
@@ -363,8 +399,9 @@ julia --project -e 'using Pkg; Pkg.test()'
 
 * Keyed list reconciliation (full reordering support; `key` currently guards
   index slots only)
-* Text wrapping, text input fields, scrolling
-* Fractional layout: flexbox-style growing/shrinking (`flex` props)
+* Text wrapping, text input fields
+* Scrollbars, keyboard paging, and fractional layout (flexbox-style
+  growing/shrinking `flex` props)
 * Custom drawing (canvas escape hatch), images
 * Window-level `on_focus`/`on_resize` callbacks
 

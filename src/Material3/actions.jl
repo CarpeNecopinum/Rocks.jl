@@ -56,7 +56,10 @@ function Button(; label = "", variant = :filled, on_press = () -> nothing,
         children = label_kids, background = bg, hover_background = hover,
         pressed_background = press, border_color = border, border_width = border_w,
         radius = t.shapes.full, height = 40,
-        padding = icon === nothing ? 24 : 16, gap = 8)
+        padding = icon === nothing ? 24 : 16, gap = 8,
+        # Positional string children (e.g. `Button("Save")`) are wrapped by
+        # Mechanics.Button; give them the themed label color and size.
+        text_color = text_color, size = t.typescale.label_large)
 end
 
 # ---- FAB ------------------------------------------------------------------

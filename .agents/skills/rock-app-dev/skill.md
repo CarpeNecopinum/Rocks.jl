@@ -75,10 +75,20 @@ opens a dialog. `quit!()` closes all windows.
 ## Built-in elements
 
 - `Window` — OS window (also the layout props of Box for its content).
-- `Box` — container: `direction` (`:column`/`:row`), `gap`, `padding`,
-  `align` (`:start`/`:center`/`:end`), `width`, `height`, `background`,
-  `border_color`, `border_width`; `position = :absolute` + `x`/`y` to place
-  manually. `Row`/`Column` are shortcuts.
+- `Box` — container: `direction` (`:column`/`:row`), `gap`, `padding`
+  (number or `(horizontal, vertical)`; `padding_x`/`padding_y` override),
+  `align` (cross axis) and `justify` (main axis), both
+  `:start`/`:center`/`:end`; `width`, `height`, `background`,
+  `border_color`, `border_width`, and `radius` (number or four corner radii
+  `(tl, tr, br, bl)`); `position = :absolute` + `x`/`y` to place manually,
+  optionally with `anchor` (`:top_left` default, `:center`, `:bottom`,
+  `:top_right`, `:bottom_left`, `:bottom_right`). `align`/`justify` remain
+  content alignment inside the child. `Row`/`Column` are shortcuts. Set
+  `scroll = true` (or `:vertical`/`:horizontal`) to make a Box scrollable.
+- `ScrollView` — a clipped, wheel-scrollable Box: `direction = :column`
+  (default) or `:row`, `scroll_step` (pixels per notch, default 48), and
+  `on_scroll(offset)`. Give it a bounded size (`width`/`height`, or
+  `position = :absolute, fill = true`). Absolute children stay pinned.
 - `Text` — props `size`, `color`, `font`; `"\\n"` for line breaks.
 - `Pressable` — `on_press`, `on_press_in`, `on_press_out`, `on_hover_in`,
   `on_hover_out`, `disabled`; `background`, `hover_background`,
@@ -123,6 +133,12 @@ end
   `M3.light_theme()` are the baseline schemes; the `Theme` struct is
   immutable (updates create new instances).
 - Icons are Unicode glyphs from `M3.ICONS` (extend the dict for more).
+- `M3.TopAppBar(...; scrolled = obs)` uses `surfaceContainer` instead of
+  `surface` when `obs[]` is true. Pair it with a pinned
+  `ScrollView` (`position = :absolute, fill = true`) whose `on_scroll` sets
+  the flag, and pass the bar `height = 64` so the absolute fill keeps its
+  height. Put a 48px spacer at the start of the scroll content to clear the
+  bar (`examples/material3.jl`).
 - `Rocks.Mechanics` holds the vanilla, appearance-prop-driven controls the M3
   components build on — use them for unstyled but complete behavior.
 

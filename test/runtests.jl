@@ -20,7 +20,7 @@ using SimpleDirectMediaLayer.LibSDL2:
     SDL_PIXELFORMAT_RGB24,
     SDL_SCANCODE_ESCAPE,
     SDLK_ESCAPE
-import Rocks: Text, Element, Window, Box, Pressable, Row, Column
+import Rocks: Text, Element, Window, Box, Pressable, Row, Column, ScrollView
 
 # All GUI-ish tests run against SDL's dummy video driver, so they work
 # without a display.
@@ -119,6 +119,32 @@ function push_mouse!(fiber, type, x, y; button = 1)
         Int32(y),
     )
     unsafe_store!(Rocks.getproperty(p, :button), mouse)
+    @assert SDL_PushEvent(p) >= 0
+    return nothing
+end
+
+function push_wheel!(fiber, x, y; dx = 0, dy = -1)
+    window = fiber
+    while !Rocks.is_window(window)
+        window = window.parent
+    end
+    # Wheel events have no coordinates; real gestures follow mouse motion.
+    Rocks.LAST_POINTER[window.host.id] = (Float64(x), Float64(y))
+    ev = Ref{Rocks.SDL_Event}()
+    p = Base.unsafe_convert(Ptr{Rocks.SDL_Event}, ev)
+    Rocks.setproperty!(p, :type, UInt32(Rocks.SDL_MOUSEWHEEL))
+    wheel = Rocks.SDL_MouseWheelEvent(
+        UInt32(Rocks.SDL_MOUSEWHEEL),
+        UInt32(0),
+        UInt32(window.host.id),
+        UInt32(0),
+        Int32(dx),
+        Int32(dy),
+        UInt32(0),
+        Cfloat(0),
+        Cfloat(0),
+    )
+    unsafe_store!(Rocks.getproperty(p, :wheel), wheel)
     @assert SDL_PushEvent(p) >= 0
     return nothing
 end
@@ -431,6 +457,131 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             @test Rocks.hit_test(w, cx, cy).kind === Text
             @test Rocks.find_pressable(Rocks.hit_test(w, cx, cy)) === pb
             @test Rocks.hit_test(w, 5, 5) === w
+        end
+    end
+
+    @testset "padding axes and justify" begin
+        function App()
+            @rock Window(
+                @rock Box(
+                    @rock Box(; width = 20, height = 10);
+                    width = 100, height = 40,
+                    padding = (10, 5), direction = :row,
+                    align = :center, justify = :center);
+                title = "pad", width = 200, height = 100)
+        end
+        with_tree(App) do root
+            w = sync_windows!(root)[1]
+            box = w.children[1]
+            child = box.children[1]
+            # padding is (horizontal, vertical); the child is centered inside
+            # the padded content box on both axes.
+            @test fmt(child.rect) == "(40, 15, 20, 10)"
+        end
+
+        # Text is measured at its natural rendered height: descenders such as
+        # the "g" in "Floating" make the surface one pixel taller than the
+        # font height, and squashing it into TTF_FontHeight used to clip
+        # glyph strokes.
+        function TextApp()
+            @rock Window(@rock Text("Floating"; size = 12);
+                         title = "text", width = 200, height = 100)
+        end
+        with_tree(TextApp) do root
+            w = sync_windows!(root)[1]
+            text = w.children[1]
+            font = Rocks.load_font(Rocks.default_font(), 12)
+            w_ref, h_ref = Ref{Cint}(0), Ref{Cint}(0)
+            Rocks.TTF_SizeUTF8(font, "Floating", w_ref, h_ref)
+            @test text.measured[2] == h_ref[]
+        end
+    end
+
+    @testset "scroll view" begin
+        offset_seen = Ref(-1.0)
+        function App()
+            @rock Window(
+                @rock ScrollView(
+                    @rock Box(; width = 200, height = 80, background = (0.9, 0.2, 0.2)),
+                    @rock Box(; width = 200, height = 80, background = (0.2, 0.7, 0.3));
+                    position = :absolute, fill = true, scroll_step = 40,
+                    on_scroll = offset -> offset_seen[] = offset);
+                title = "scroll", width = 200, height = 100)
+        end
+        with_tree(App) do root
+            w = sync_windows!(root)[1]
+            sv = w.children[1]
+            @test sv.kind === ScrollView
+            @test sv.host isa Rocks.ScrollState
+            @test fmt(sv.rect) == "(0, 0, 200, 100)"
+            @test sv.host.max_offset == 60
+            @test sv.children[1].rect[2] == 0
+
+            # one wheel notch scrolls one step; the callback sees the offset
+            push_wheel!(sv, 100, 50; dy = -1)
+            drain_events!()
+            @test sv.host.offset == 40
+            @test offset_seen[] == 40
+            # the runtime re-lays out on the next frame, translating content
+            Rocks.measure!(w)
+            Rocks.place!(w, 0.0, 0.0)
+            @test sv.children[1].rect[2] == -40
+            @test sv.children[2].rect[2] == 40
+            # hit testing follows the translated rects
+            @test Rocks.hit_test(w, 100, 5) === sv.children[1]
+            @test Rocks.hit_test(w, 100, 45) === sv.children[2]
+
+            # reversing reaches the top and reports the new offset; another
+            # upward notch at the top is a no-op
+            push_wheel!(sv, 100, 50; dy = 1)
+            drain_events!()
+            @test sv.host.offset == 0
+            @test offset_seen[] == 0
+            offset_seen[] = -1.0
+            push_wheel!(sv, 100, 50; dy = 1)
+            drain_events!()
+            @test sv.host.offset == 0
+            @test offset_seen[] == -1.0
+        end
+
+        # Content is clipped to the scroll viewport (a screenshot check: with
+        # no clip, the red box would paint above the viewport at y < 50).
+        RED = (0.9, 0.2, 0.2)
+        GREEN = (0.1, 0.7, 0.3)
+        BLUE = (0.15, 0.25, 0.85)
+        function ClipApp()
+            @rock Window(
+                @rock ScrollView(
+                    @rock Box(; width = 200, height = 80, background = RED),
+                    @rock Box(; width = 200, height = 80, background = GREEN);
+                    position = :absolute, y = 50, width = 200, height = 50,
+                    scroll_step = 40);
+                title = "clip", width = 200, height = 100, background = BLUE)
+        end
+        with_tree(ClipApp) do root
+            w = sync_windows!(root)[1]
+            sv = w.children[1]
+            Rocks.scroll_by!(sv, 0.0, -1.0)
+            Rocks.measure!(w)
+            Rocks.place!(w, 0.0, 0.0)
+            path = joinpath(mktempdir(), "scroll.png")
+            Rocks.screenshot(root, path)
+            @test png_pixel(path, 100, 25) == Rocks._to_rgba(BLUE)
+            @test png_pixel(path, 100, 60) == Rocks._to_rgba(RED)
+            @test png_pixel(path, 100, 95) == Rocks._to_rgba(GREEN)
+        end
+
+        # An absolute fill child keeps its fixed height (used by pinned app
+        # bars), while filling the parent's width.
+        function FillHeightApp()
+            @rock Window(
+                @rock Box(; position = :absolute, fill = true, height = 50,
+                          background = RED);
+                title = "fill height", width = 200, height = 100)
+        end
+        with_tree(FillHeightApp) do root
+            w = sync_windows!(root)[1]
+            @test fmt(w.children[1].rect) == "(0, 0, 200, 50)"
         end
     end
 
@@ -1008,10 +1159,15 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 button = find_kind(root, Mechanics.Button)
                 pressable = find_kind(root, Pressable)
                 @test pressable.props[:background] == M3.dark_theme().primary
+                # the positional string label is themed too
+                @test find_kind(root, Text).props[:color] ==
+                      M3.dark_theme().on_primary
                 dark[] = M3.light_theme()
                 Rocks.perform_render!(root)
                 @test find_kind(root, Pressable).props[:background] ==
                       M3.light_theme().primary
+                @test find_kind(root, Text).props[:color] ==
+                      M3.light_theme().on_primary
             end
         end
 
@@ -1064,12 +1220,34 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
 
             on = Observable(false)
             function SwApp()
-                @rock M3.Switch(on = on)
+                @rock Window(@rock M3.Switch(on = on);
+                             title = "switch", width = 200, height = 100)
             end
             with_tree(SwApp) do root
+                sync_windows!(root)
                 pressable = find_kind(root, Pressable)
+                boxes = collect_kind(root, Box)
+                i = findfirst(b -> get(b.props, :width, nothing) == 16 &&
+                                   get(b.props, :radius, nothing) == 8, boxes)
+                thumb, track = boxes[i], boxes[i].parent
+                # unchecked: concentric with the track's left cap
+                @test thumb.rect[1] - track.rect[1] == 8
+                @test thumb.rect[2] - track.rect[2] == 8
+                @test thumb.rect[1] + thumb.rect[3] / 2 ==
+                      track.rect[1] + track.rect[4] / 2
                 pressable.props[:on_press]()
                 @test on[] == true
+                Rocks.perform_render!(root)
+                sync_windows!(root)
+                boxes = collect_kind(root, Box)
+                i = findfirst(b -> get(b.props, :width, nothing) == 24 &&
+                                   get(b.props, :radius, nothing) == 12, boxes)
+                thumb, track = boxes[i], boxes[i].parent
+                # checked: concentric with the track's right cap
+                @test thumb.rect[1] - track.rect[1] == 52 - 24 - 4
+                @test thumb.rect[2] - track.rect[2] == 4
+                @test thumb.rect[1] + thumb.rect[3] / 2 ==
+                      track.rect[1] + track.rect[3] - track.rect[4] / 2
             end
         end
 
@@ -1092,6 +1270,11 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             with_tree(MultiApp) do root
                 segments = collect_kind(root, Pressable)
                 @test length(segments) == 3
+                full = M3.light_theme().shapes.full
+                # only the outer corners of the group are rounded
+                @test segments[1].props[:radius] == (full, 0.0, 0.0, full)
+                @test segments[2].props[:radius] == (0.0, 0.0, 0.0, 0.0)
+                @test segments[3].props[:radius] == (0.0, full, full, 0.0)
                 segments[2].props[:on_press]()
                 @test multi[] == [1, 2]
                 segments[1].props[:on_press]()
@@ -1120,7 +1303,8 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             with_tree(SliderApp) do root
                 slider = find_kind(root, Slider)
                 @test slider.kind === Slider
-                @test slider.props[:thumb_width] == 4 # M3 handle gap
+                @test slider.props[:thumb_width] == 10 # gap around the handle
+                @test slider.props[:handle_width] == 4
                 @test slider.props[:track_height] == 16
                 @test slider.props[:active_color] == M3.light_theme().primary
             end
@@ -1207,6 +1391,21 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 @test length(destinations) == 2
                 destinations[2].props[:on_press]()
                 @test selected[] == 2
+            end
+        end
+
+        @testset "top app bar scroll color" begin
+            scrolled = Observable(false)
+            function AppBarApp()
+                @rock M3.TopAppBar("Title"; scrolled = scrolled)
+            end
+            with_tree(AppBarApp) do root
+                bar = find_kind(root, Box)
+                @test bar.props[:background] == M3.light_theme().surface
+                scrolled[] = true
+                Rocks.perform_render!(root)
+                bar = find_kind(root, Box)
+                @test bar.props[:background] == M3.light_theme().surface_container
             end
         end
     end
