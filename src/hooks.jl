@@ -14,6 +14,19 @@ const PENDING_EFFECTS = Any[] # Vector{Tuple{Fiber,EffectHook,Function}}
 
 current_fiber() = CURRENT_FIBER[]
 
+"""
+    use_fiber() -> Fiber
+
+The fiber of the component currently being rendered. Event callbacks and
+effects close over it to look up placed geometry (rects, measured sizes) of
+their output at event time, when the render spec is long gone.
+"""
+function use_fiber()
+    fiber = CURRENT_FIBER[]
+    fiber === nothing && error("use_fiber may only be called during a render")
+    return fiber
+end
+
 # Reserve the next hook slot for the current fiber. Returns (hook, created).
 function use_hook(mk)
     fiber = CURRENT_FIBER[]

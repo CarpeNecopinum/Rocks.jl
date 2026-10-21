@@ -112,6 +112,10 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
     focused = has_focus()
     h = something(height, t.metrics.input_height)
     edit = !disabled && !read_only
+    # The right-click edit menu (Cut/Copy/Paste/…) anchored at the pointer.
+    menu_open = @use Observable(false)
+    menu_x = @use Observable(0.0)
+    menu_y = @use Observable(0.0)
 
     # Editing state is re-read inside callbacks so queued events act on the
     # current text and cursor, not on values captured during render.
@@ -191,6 +195,15 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
         return nothing
     end
 
+    # Losing focus resets the selection: desktop text fields only ever have
+    # one selected piece of text, so a blurred field collapses back to its
+    # caret (which stays put for the next focus). The right-click menu closes
+    # with it.
+    useEffect(() -> begin
+        !focused && (anchor[] = -1; menu_open[] = false)
+        return nothing
+    end, (focused,))
+
     # ---- render ------------------------------------------------------------
     placeholder === nothing && (placeholder = "")
     value = text[]
@@ -222,6 +235,68 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
         width = max(text_width(span, t), 1.0), height = max(h - 6, 4),
         background = t.colors.selection)) : nothing
     row = @rock Row(content...; gap = 0, align = :center)
+
+    # Right-click edit menu over the field (Cut/[Paste/Delete enabled for
+    # editable selections], Copy/Select all otherwise).
+    (cs, n, m, lo, hi) = state()
+    menu_items = Any[
+        MenuItem(label = "Cut", enabled = edit && lo < hi,
+                 on_press = () -> (copy!(); delete!())),
+        MenuItem(label = "Copy", enabled = lo < hi,
+                 on_press = () -> copy!()),
+        MenuSeparator(),
+        MenuItem(label = "Paste", enabled = edit,
+                 on_press = () -> insert!(clipboard_get_text())),
+        MenuItem(label = "Delete", enabled = edit && lo < hi,
+                 on_press = () -> delete!(true)),
+        MenuSeparator(),
+        MenuItem(label = "Select all", enabled = length(collect(text[])) > 0,
+                 on_press = () -> select!(0, length(collect(text[]))))
+    ]
+
+    # ---- mouse -------------------------------------------------------------
+    # Event callbacks run after the render, so they resolve placed geometry
+    # from this component's fiber instead of the render spec (`row` is an
+    # `Element`, whose rect/measured fields only exist on the fiber).
+    self = use_fiber()
+    field_fiber() = begin
+        for c in self.children
+            c.kind === _PRESSABLE && return c
+        end
+        return nothing
+    end
+    row_fiber() = begin
+        f = field_fiber()
+        f === nothing && return nothing
+        for cc in f.children
+            cc.kind === Row && return cc
+        end
+        return nothing
+    end
+    row_width() = begin
+        rf = row_fiber()
+        rf === nothing ? 0.0 : max(get(rf.measured, 1, 0.0), 0.0)
+    end
+
+    # Character boundary the pointer lands at, based on the text row geometry.
+    caret_at(x) = begin
+        rf = row_fiber()
+        rf === nothing && return 0
+        roww = max(get(rf.measured, 1, 0.0), 0.0)
+        x = clamp(x - rf.rect[1], 0.0, roww)
+        acc, pos = 0.0, 0
+        for (i, c) in enumerate(collect(text[]))
+            w = text_width(string(c), t)
+            acc + w / 2 <= x || break
+            acc += w
+            pos = i
+        end
+        return pos
+    end
+
+    ctx = menu_open[] ? ContextMenu(open = menu_open,
+                 x = menu_x[], y = menu_y[], width = 150,
+                 items = menu_items) : nothing
 
     return Element(
         _PRESSABLE,
@@ -273,21 +348,39 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
                 end
                 nothing
             end,
-            :on_press => disabled ? () -> nothing : (px, py) -> begin
-                # Place the caret at the clicked character boundary; the row
-                # rect already covers border and padding.
-                roww = max(get(row.measured, 1, 0.0), 0.0)
-                x = clamp(px - row.rect[1], 0.0, roww)
-                acc, pos = 0.0, 0
-                for (i, c) in enumerate(collect(text[]))
-                    w = text_width(string(c), t)
-                    acc + w / 2 <= x || break
-                    acc += w
-                    pos = i
+            :on_press_in => disabled ? () -> nothing : (px, py, btn) -> begin
+                if btn == 3
+                    # Right-click opens the edit menu at the pointer (the
+                    # caret and selection stay as they are). The menu opens
+                    # as its own borderless OS window pinned just below the
+                    # pointer, in screen coordinates.
+                    (wx, wy) = window_origin(self)
+                    menu_x[] = wx + px
+                    menu_y[] = wy + py + 2.0
+                    menu_open[] = true
+                    return nothing
                 end
-                select!(pos, pos)
+                # Place the caret at the pressed character boundary; the row
+                # rect already covers border and padding.
+                pos = caret_at(px)
+                cur[] = anchor[] = pos
+                return nothing
+            end,
+            :on_drag => disabled ? nothing : (px, py) -> begin
+                # Hold-and-drag extends the selection from the press point.
+                cur[] = caret_at(px)
+                return nothing
+            end,
+            :on_press => disabled ? () -> nothing : (px, py, btn) -> begin
+                btn == 3 && return nothing
+                # Left release: the drag selection snaps to the release
+                # position; a click without a drag collapses the anchor.
+                cur[] = caret_at(px)
+                cur[] == anchor[] && (anchor[] = -1)
+                return nothing
             end,
             :disabled => disabled,
+            :cursor => :text,
             :background => t.colors.input,
             :hover_background => t.colors.input,
             :border_color => focused ? t.colors.focus : t.colors.input_border,
@@ -303,7 +396,7 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
             :direction => :row,
             :align => :center,
         ),
-        Any[selbg, caret, row],
+        Any[selbg, caret, row, ctx],
     )
 end
 

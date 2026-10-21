@@ -61,7 +61,7 @@ export @rock, @use, render, quit!, screenshot,
        Image, Split, Slider, LinearGradient,
        Button, Checkbox, Toggle, RadioGroup, DropDownMenu, Tabber, ProgressBar,
        createContext, Context,
-       useEffect, useMemo, useCallback,
+       useEffect, useMemo, useCallback, use_fiber,
        useInterval, useTimeout,
        set_default_font!, load_font,
        Mechanics

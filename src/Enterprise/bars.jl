@@ -105,28 +105,16 @@ function popup_shadows(x, y, w, h)
     ]
 end
 
-function menu_dropdown(items, t::Theme, close; x, y, width = 200)
-    rows = Any[menu_item_row(normalize_item(i), t, close; width = width - 4)
-               for i in items]
-    h = 4 + sum((normalize_item(i).label == "-" ? 5 : 22 for i in items), init = 0)
-    return Any[popup_shadows(x, y, width, h)...,
-               (@rock Box(;
-                   position = :absolute, x = x, y = y, width = width, height = h,
-                   background = t.colors.document,
-                   border_color = t.colors.border, border_width = 1,
-                   bevel = :raised, radius = 0, padding = 2,
-                   direction = :column, gap = 0, children = rows))]
-end
-
 # ---- MenuBar --------------------------------------------------------------
 
 """
     Enterprise.MenuBar(; menus)
 
-A 22px menu bar. It renders as a transparent full-window overlay so open
-dropdowns paint above page content and are not clipped by scroll views.
-[`Form`](@ref) positions it automatically through its `menu` prop; when used
-directly as a child of a `Window`, pass `position = :absolute, fill = true`.
+A 22px menu bar. Open dropdown menus open as their own borderless OS windows
+pinned under their title, so they are never clipped by the owner window and
+always paint above its content. [`Form`](@ref) positions it automatically
+through its `menu` prop; when used directly as a child of a `Window`, pass
+`position = :absolute, fill = true`.
 
 ```julia
 @rock Enterprise.MenuBar(menus = [
@@ -141,7 +129,10 @@ directly as a child of a `Window`, pass `position = :absolute, fill = true`.
 function MenuBar(; menus = Any[], position = :absolute, fill = true,
                  x = 0, y = 0)
     t = theme()
+    self = use_fiber()
     open = @use Observable(0)
+    menu_x = @use Observable(0.0)
+    menu_y = @use Observable(0.0)
     open_idx = open[]
     entries = normalize_menu.(collect(menus))
     widths = [text_width(m.label, t) + 18 for m in entries]
@@ -157,11 +148,20 @@ function MenuBar(; menus = Any[], position = :absolute, fill = true,
         active = open_idx == i
         # Flat until clicked: no hover highlight (it breaks the plastic look
         # of the bar). Only the open menu gets the recessed plastic
-        # highlight, like Win7.
+        # highlight, like Win7. The press callback receives the pointer
+        # position when it takes three arguments; the menu opens as its own
+        # borderless OS window pinned right under the title.
         push!(buttons, @rock Pressable(
             text_element(m.label; color = t.colors.text,
                          size = t.metrics.font_size, font = t.font);
-            on_press = () -> open[] = active ? 0 : i,
+            on_press = () -> begin
+                if !active
+                    (ox, oy) = window_origin(self)
+                    menu_x[] = ox + xs[i]
+                    menu_y[] = oy + t.metrics.menu_height
+                end
+                open[] = active ? 0 : i
+            end,
             background = active ? t.gradients.item_hot : nothing,
             hover_background = active ? t.gradients.item_hot : nothing,
             pressed_background = t.gradients.item_hot,
@@ -180,56 +180,47 @@ function MenuBar(; menus = Any[], position = :absolute, fill = true,
         border_color = t.colors.border, border_width = 1,
         height = t.metrics.menu_height,
         padding = 0, direction = :row, align = :center)
+    # The dropdown is a separate borderless OS window, so it is never clipped
+    # by the owner window and always paints above its content.
     dropdown = open_idx >= 1 && open_idx <= length(entries) ?
-              menu_dropdown(entries[open_idx].items, t, close;
-                            x = xs[open_idx],
-                            y = t.metrics.menu_height) : Element[]
-    scrim = open_idx == 0 ? nothing :
-            (@rock Pressable(;
-                position = :absolute, fill = true,
-                on_press = close, background = nothing))
+              menu_popup(entries[open_idx].items, t, close;
+                         x = menu_x[], y = menu_y[],
+                         width = 200,
+                         height = menu_popup_height(entries[open_idx].items),
+                         open = open) : nothing
     return Element(
         _BOX,
         props_dict(:position => Symbol(position), :x => x, :y => y,
                    :fill => fill, :pointer_events => :none,
                    :direction => :column),
-        Any[scrim, row, dropdown...],
+        Any[row, dropdown],
     )
 end
 
 # ---- ContextMenu ----------------------------------------------------------
 
 """
-    Enterprise.ContextMenu(; open, anchor_x = 0, anchor_y = 0, items,
-                           width = 180, position = :absolute, fill = true)
+    Enterprise.ContextMenu(; open, x = 0, y = 0, items = Any[], width = 180)
 
-A popup menu anchored within its overlay parent. `open` is an
-`Observable{Bool}`; item callbacks close it automatically. Use it with
-`position = :absolute, fill = true` (and usually `anchor_x`/`anchor_y`) so it
-covers the surrounding page and paints above sibling content.
+A popup menu that opens as its own borderless OS window at global screen
+coordinates `(x, y)` — not clipped by its owner window, and always painted
+above every other window. `open` is an `Observable{Bool}`; item callbacks
+close it automatically. Clicking elsewhere or pressing Escape dismisses it.
+
+```julia
+@rock E.ContextMenu(open = open, x = 100, y = 120,
+                    items = [E.MenuItem(label = "Rename")])
+```
 """
-function ContextMenu(; open, x = 0, y = 0, anchor_x = nothing, anchor_y = nothing,
-                     items = Any[], width = 180,
-                     position = :absolute, fill = true,
-                     pointer_events = :none)
+function ContextMenu(; open, x = 0, y = 0, items = Any[], width = 180)
     open isa Observable ||
         error("Enterprise.ContextMenu needs an `Observable{Bool}` as `open`")
     t = theme()
     open = @use open
     open[] || return nothing
     close() = (open[] = false)
-    px = anchor_x === nothing ? x : anchor_x
-    py = anchor_y === nothing ? y : anchor_y
-    parts = menu_dropdown(items, t, close; x = px, y = py, width = width)
-    scrim = @rock Pressable(; position = :absolute, fill = true,
-                            on_press = close, background = nothing)
-    return Element(
-        _BOX,
-        props_dict(:position => Symbol(position), :x => 0, :y => 0,
-                   :fill => fill, :pointer_events => :none,
-                   :direction => :column),
-        Any[scrim, parts...],
-    )
+    return menu_popup(items, t, close; x = x, y = y, width = width,
+                      height = menu_popup_height(items), open = open)
 end
 
 # ---- ToolBar / ToolButton -------------------------------------------------

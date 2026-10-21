@@ -102,6 +102,7 @@ conditional hooks), exactly like React.
 | `@use expr` | State. `expr` creates a `Ref` or an `Observable` on the first render and is returned on every render. Setting an `Observable` re-renders; `Ref`s are silent. `@use SomeContext` is the context receiver. |
 | `useEffect(f, deps = nothing)` | Side effects after render. `nothing` = every render, `()` = once on mount, `(x,)` = when `x` changes. Return a cleanup function from `f`. |
 | `useMemo(f, deps)` / `useCallback(f, deps)` | Memoization. |
+| `use_fiber()` | The fiber of the component currently being rendered — event callbacks and effects can use it to look up placed geometry (rects, measured sizes) of their output. |
 | `useInterval(f, ms)` / `useTimeout(f, ms)` | Timers, cleaned up automatically on unmount. |
 
 State is a `Ref` or an `Observable` created with `@use` — read and write it
@@ -233,6 +234,8 @@ Akin to React Native, styling is left to the user. Rocks provides primitives:
   pointer events. Props: `on_press`, `on_press_in`, `on_press_out`,
   `on_hover_in`, `on_hover_out`, `disabled`, and `background`,
   `hover_background`, `pressed_background` for state-dependent styling.
+  `cursor` picks the pointer shape while hovered — `:hand` (the default
+  pressable) or `:text`, which shows the I-beam over editable text.
 * **`Image`** — a graphics file (PNG/JPG/BMP/... via SDL2_image). `src` is a
   path or an URL (fetched with `Downloads` and cached); `width`/`height`
   scale it (keeping the aspect ratio when only one is given).
@@ -405,14 +408,17 @@ scrolls only the client area. `E.light_theme()` is the Aero-inspired default;
 `E.classic_theme()` and `E.high_contrast_theme()` are alternatives. Supply an
 `Observable{Theme}` to switch themes live.
 
-Menus stay transparent full-window overlays so their popups paint above page
-content, complete with a subtle drop shadow; clicking outside a menu closes
-it. Menu titles and toolbar buttons stay flat under the pointer — the
+Menus open as **separate borderless OS popup windows** pinned at their anchor
+in screen coordinates, so a menu is never clipped by the edges of its owner
+window and always paints above every other window's content (including
+dialogues). Clicking anywhere outside the menu (or pressing Escape) closes it,
+and that first click is swallowed as the dismiss gesture. Menu titles and
+toolbar buttons stay flat under the pointer — the
 recessed plastic highlight appears only while an item is pressed or its menu
 is open. `MessageBox` opens as its **own OS window** (native title bar and
 close button — the close button resolves like the Cancel choice, so no scrim
-is drawn over the parent window). `Form` wires the overlay or dialog window
-in automatically through its `menu` and `overlay` props; a standalone
+is drawn over the parent window). `Form` wires the menu window in
+automatically through its `menu` prop; a standalone
 `ContextMenu` or `MenuBar` should be
 given `position = :absolute, fill = true`. A `ComboBox` popup is painted by
 the combo itself, so leave vertical room below it (or place it after
@@ -432,7 +438,12 @@ the thumb travel exactly (the end ticks sit where the knob's center can
 reach); check/radio labels follow the theme's font size; and `TextBox` is a
 real editing field — caret and visible selection, Shift+arrows/Home/End,
 Ctrl+A/C/X/V against the SDL clipboard, Ctrl+←/→ word jumps and insert mode
-with the Return/Escape keys wired to focus handling.
+with the Return/Escape keys wired to focus handling. The mouse works too:
+clicking places the caret, holding a button and dragging extends the
+selection, and right-click opens an edit menu (Cut, Copy, Paste, Delete,
+Select all, disabled to match the current state). Losing focus collapses
+the selection and closes that menu, since only one selected piece of text
+exists at a time.
 
 See `examples/enterprise.jl` for a full tour — menu bar, toolbar, tabs,
 group boxes, text fields, combo box, check/radio buttons, progress/slider,

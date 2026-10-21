@@ -132,3 +132,41 @@ function grip_dots(; rows = 3, color = nothing)
     lines = [(@rock Row(cols...; gap = 2, align = :center)) for _ in 1:rows]
     return @rock Column(lines...; gap = 2, align = :center)
 end
+
+# Screen origin (x, y) of the OS window that `fiber` belongs to — the base
+# coordinate for popup menus, which open as separate borderless windows so
+# they can grow beyond their owner. `(0, 0)` before the owner window exists.
+function window_origin(fiber)
+    f = fiber
+    while f !== nothing && !is_window(f)
+        f = f.parent
+    end
+    f === nothing && return (0, 0)
+    (f.host isa WindowState && f.host.ptr != C_NULL) || return (0, 0)
+    x, y = Ref{Cint}(0), Ref{Cint}(0)
+    SDL_GetWindowPosition(f.host.ptr, x, y)
+    return (Int(x[]), Int(y[]))
+end
+
+# The borderless OS-window popup that hosts a menu: content = a bevel box of
+# item rows sized to the window so nothing clips, `:menu_open` carries the
+# open observable that `close_open_menus!` flips when the user clicks or
+# presses Escape elsewhere.
+function menu_popup(items, t, close; x, y, width, height, open)
+    rows = Any[menu_item_row(normalize_item(i), t, close; width = width - 4)
+               for i in items]
+    box = @rock Box(rows...;
+        width = width, height = height,
+        background = t.colors.document,
+        border_color = t.colors.border, border_width = 1,
+        bevel = :raised, radius = 0, padding = 2,
+        direction = :column, gap = 0)
+    return @rock Window(box;
+        position = :manual, x = Int(x), y = Int(y),
+        width = width, height = height,
+        popup = true, menu_open = open)
+end
+
+# Height of a popup menu holding `items` (separator rows are 5px, entries 22px).
+menu_popup_height(items) =
+    4 + sum((normalize_item(i).label == "-" ? 5 : 22 for i in items), init = 0)

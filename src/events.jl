@@ -22,6 +22,7 @@ const LAST_KEYMODS = Ref(Cuint(0))
 
 const HAND_CURSOR = Ref{Ptr{SDL_Cursor}}(C_NULL)
 const ARROW_CURSOR = Ref{Ptr{SDL_Cursor}}(C_NULL)
+const TEXT_CURSOR = Ref{Ptr{SDL_Cursor}}(C_NULL)
 
 const HOVERED_ACTIVE = Ref(false)
 
@@ -161,12 +162,20 @@ function find_scrollbar_track(target, x, y)
 end
 
 "Invoke a press callback, passing the pointer position when the callback takes
-two arguments (e.g. text fields that place their caret where you click)."
-function callback_press!(props, name::Symbol, x, y)
+two arguments (e.g. text fields that place their caret where you click) and
+the button when it takes three (left down/up vs. right-click for a text
+field's popup menu)."
+function callback_press!(props, name::Symbol, x, y, button = 1)
     f = get(props, name, nothing)
     f isa Function || return
     try
-        hasmethod(f, Tuple{Any,Any}) ? f(x, y) : f()
+        if hasmethod(f, Tuple{Any,Any,Any})
+            f(x, y, button)
+        elseif hasmethod(f, Tuple{Any,Any})
+            f(x, y)
+        else
+            f()
+        end
     catch err
         @warn "Rocks: callback :$name failed" exception = (err, catch_backtrace())
     end
@@ -363,9 +372,34 @@ function update_cursor()
     if HAND_CURSOR[] == C_NULL
         HAND_CURSOR[] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_HAND)
         ARROW_CURSOR[] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW)
+        TEXT_CURSOR[] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_IBEAM)
     end
-    SDL_SetCursor(HOVERED_ACTIVE[] ? HAND_CURSOR[] : ARROW_CURSOR[])
+    cursor = ARROW_CURSOR[]
+    if HOVERED_ACTIVE[]
+        # A hovered pressable that asks for a text pointer (e.g. a TextBox)
+        # shows the I-beam; everything else hoverable is a clickable control.
+        wants_text = any(get(p.props, :cursor, nothing) === :text
+                         for p in values(HOVERED))
+        cursor = wants_text ? TEXT_CURSOR[] : HAND_CURSOR[]
+    end
+    SDL_SetCursor(cursor)
     return nothing
+end
+
+"Close every popup menu window except the one with window id `except` (0
+closes all). The menu's `:menu_open` observable is set to `0`/`false`;
+returns true when any menu was closed, so the invoking press can be
+swallowed as the dismiss gesture."
+function close_open_menus!(except)
+    closed = false
+    for (id, f) in WINDOW_BY_ID
+        obs = get(f.props, :menu_open, nothing)
+        (obs isa Observable && id != except) || continue
+        obs[] = 0
+        closed = true
+    end
+    closed && request_render()
+    return closed
 end
 
 function set_hover!(window_id, pressable)
@@ -427,6 +461,8 @@ function dispatch_event!(event::SDL_Event)
         fiber === nothing && return
         mx, my = event.button.x, event.button.y
         LAST_POINTER[wid] = (Float64(mx), Float64(my))
+        # The first click only dismisses open popup menus (Windows gesture).
+        close_open_menus!(wid) && return
         target = hit_test(fiber, mx, my)
 
         # Focus follows the press: the nearest fiber handling keyboard events
@@ -479,7 +515,8 @@ function dispatch_event!(event::SDL_Event)
         if pressable !== nothing && !Bool(get(pressable.props, :disabled, false))
             ACTIVE_PRESS[(wid, event.button.button)] = pressable
             pressable.host isa PressState && (pressable.host.pressed = true)
-            callback_press!(pressable.props, :on_press_in, Float64(mx), Float64(my))
+            callback_press!(pressable.props, :on_press_in,
+                            Float64(mx), Float64(my), Int(event.button.button))
             mark_window_draw!(wid)
         end
     elseif ty == SDL_MOUSEBUTTONUP
@@ -496,7 +533,8 @@ function dispatch_event!(event::SDL_Event)
         callback(pressable.props, :on_press_out)
         if pressable.mounted && pressable.kind === _PRESSABLE &&
            inside(pressable.rect, mx, my) && !Bool(get(pressable.props, :disabled, false))
-            callback_press!(pressable.props, :on_press, Float64(mx), Float64(my))
+            callback_press!(pressable.props, :on_press, Float64(mx), Float64(my),
+                            Int(event.button.button))
         end
         mark_window_draw!(wid)
     elseif ty == SDL_MOUSEMOTION
@@ -509,6 +547,21 @@ function dispatch_event!(event::SDL_Event)
         end
         fiber = get(WINDOW_BY_ID, wid, nothing)
         fiber === nothing && (set_hover!(wid, nothing); return)
+        # Holding the pointer down over a text field and dragging extends its
+        # selection (the field's `on_drag` sees pointer positions).
+        pressable = get(ACTIVE_PRESS, (wid, 1), nothing)
+        if pressable !== nothing && haskey(pressable.props, :on_drag)
+            f = pressable.props[:on_drag]
+            if f isa Function
+                try
+                    f(Float64(mx), Float64(my))
+                catch err
+                    @warn "Rocks: callback :on_drag failed" exception =
+                        (err, catch_backtrace())
+                end
+            end
+            mark_window_draw!(wid)
+        end
         target = hit_test(fiber, mx, my)
         set_hover!(wid, find_pressable(target))
     elseif ty == SDL_MOUSEWHEEL
@@ -535,6 +588,10 @@ function dispatch_event!(event::SDL_Event)
         target = keyboard_target(fiber)
         key = unsafe_string(SDL_GetKeyName(event.key.keysym.sym))
         LAST_KEYMODS[] = event.key.keysym.mod
+        # Escape first dismisses open popup menus (before fields see it).
+        if key == "Escape" && close_open_menus!(0)
+            return
+        end
         # `on_key_mods(key, mods)` sees the raw SDL modifier flags and wins:
         # when it returns `:handled`, plain `on_key` is not called (this lets
         # text fields own Ctrl+C/V/X/A and Shift+cursor selection).

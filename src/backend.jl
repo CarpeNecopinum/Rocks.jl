@@ -271,8 +271,15 @@ function create_window!(fiber)
     title = string(get(fiber.props, :title, "Rocks"))
     width, height = window_size(fiber)
     resizable = Bool(get(fiber.props, :resizable, false))
+    popup = Bool(get(fiber.props, :popup, false))
     flags = UInt32(SDL_WINDOW_SHOWN)
     resizable && (flags |= UInt32(SDL_WINDOW_RESIZABLE))
+    if popup
+        # Popup menus: borderless, transient, always above the parent —
+        # the window content draws its own bevel border.
+        flags |= UInt32(SDL_WINDOW_BORDERLESS | SDL_WINDOW_POPUP_MENU |
+                        SDL_WINDOW_ALWAYS_ON_TOP | SDL_WINDOW_SKIP_TASKBAR)
+    end
     xpos, ypos = window_position(fiber)
     ptr = SDL_CreateWindow(title, xpos, ypos, width, height, flags)
     ptr == C_NULL && error("SDL_CreateWindow failed: $(unsafe_string(SDL_GetError()))")
@@ -289,6 +296,8 @@ function create_window!(fiber)
     state = WindowState(ptr, renderer, SDL_GetWindowID(ptr), width, height, true, false)
     fiber.host = state
     WINDOW_BY_ID[state.id] = fiber
+    # Menu popups must paint above their owner window.
+    popup && SDL_RaiseWindow(ptr)
     return state
 end
 

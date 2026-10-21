@@ -201,10 +201,8 @@ function ControlsPage(; fill = false)
                   E.MenuItem(label = "Copy", shortcut = "Ctrl+C"),
                   E.MenuSeparator(),
                   E.MenuItem(label = "Properties")]
-    ctx = @rock E.ContextMenu(open = context_open, x = 0, y = 0,
-                              anchor_x = 60, anchor_y = 40,
-                              items = menu_items,
-                              position = :absolute, fill = true)
+    ctx = @rock E.ContextMenu(open = context_open, x = 60, y = 50,
+                              items = menu_items)
     page = @rock Column(buttons, misc, split_group; gap = 12, fill = fill)
     return @rock Box(page, ctx; direction = :column, fill = fill)
 end

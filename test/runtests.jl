@@ -4,6 +4,9 @@ using ColorTypes: RGB, RGBA
 using SimpleDirectMediaLayer.LibSDL2:
     SDL_PollEvent,
     SDL_PushEvent,
+    SDL_GetCursor,
+    SDLK_ESCAPE,
+    SDL_Scancode,
     SDL_GetWindowTitle,
     SDL_GetWindowPosition,
     SDL_GetMouseState,
@@ -123,6 +126,30 @@ function push_mouse!(fiber, type, x, y; button = 1)
         Int32(y),
     )
     unsafe_store!(Rocks.getproperty(p, :button), mouse)
+    @assert SDL_PushEvent(p) >= 0
+    return nothing
+end
+
+function push_motion!(fiber, x, y)
+    window = fiber
+    while !Rocks.is_window(window)
+        window = window.parent
+    end
+    ev = Ref{Rocks.SDL_Event}()
+    p = Base.unsafe_convert(Ptr{Rocks.SDL_Event}, ev)
+    Rocks.setproperty!(p, :type, UInt32(Rocks.SDL_MOUSEMOTION))
+    motion = Rocks.SDL_MouseMotionEvent(
+        UInt32(Rocks.SDL_MOUSEMOTION),
+        UInt32(0),
+        UInt32(window.host.id),
+        UInt32(0),
+        UInt32(0x0001), # left button held
+        Int32(x),
+        Int32(y),
+        Int32(0),
+        Int32(0),
+    )
+    unsafe_store!(Rocks.getproperty(p, :motion), motion)
     @assert SDL_PushEvent(p) >= 0
     return nothing
 end
@@ -1419,6 +1446,12 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         text_of(f) = f.kind === Text ? Rocks.text_content(f) :
                      join((text_of(c) for c in f.children), "")
         function pressable_with(f, needle)
+            # Exact label first: a parent pressable's text includes its whole
+            # subtree (e.g. a TextBox with a right-click menu inside), so
+            # substring matching could otherwise hit the wrapper first.
+            for p in collect_kind(f, Pressable)
+                text_of(p) == needle && return p
+            end
             for p in collect_kind(f, Pressable)
                 occursin(needle, text_of(p)) && return p
             end
@@ -1772,8 +1805,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             ctx_fired = Ref(0)
             function ContextApp()
                 @rock Window(
-                    @rock E.ContextMenu(open = ctx_open, anchor_x = 10,
-                        anchor_y = 10, position = :absolute, fill = true,
+                    @rock E.ContextMenu(open = ctx_open, x = 10, y = 10,
                         items = [E.MenuItem(label = "Copy",
                             on_press = () -> ctx_fired[] += 1)]);
                     width = 200, height = 150)
@@ -1785,6 +1817,53 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 copy.props[:on_press]()
                 @test ctx_fired[] == 1
                 @test !ctx_open[]
+                Rocks.perform_render!(root); Rocks.run_effects!()
+                clean = sync_windows!(root)
+                # The context menu mounts as its own borderless popup window
+                # (owner + menu) and closes with its observable.
+                @test count(w -> w.host isa Rocks.WindowState, clean) == 1
+                @test pressable_with(root, "Copy") === nothing
+
+                # Reopening creates the popup window again; a press anywhere
+                # in the owner window then dismisses the menu (swallowed —
+                # the item underneath never fires).
+                ctx_open[] = true
+                Rocks.perform_render!(root); Rocks.run_effects!()
+                wins = sync_windows!(root)
+                @test count(w -> w.host isa Rocks.WindowState, wins) == 2
+                menu = [w for w in wins if Bool(get(w.props, :popup, false))][1]
+                @test Bool(get(menu.props, :resizable, false)) == false
+                @test get(menu.props, :menu_open, nothing) === ctx_open
+                owner = [w for w in wins if !Bool(get(w.props, :popup, false))][1]
+                push_mouse!(owner, Rocks.SDL_MOUSEBUTTONDOWN, 100, 100)
+                drain_events!()
+                Rocks.perform_render!(root)
+                Rocks.run_effects!()
+                wins = sync_windows!(root)
+                @test !ctx_open[]
+                @test ctx_fired[] == 1
+                @test count(w -> w.host isa Rocks.WindowState, wins) == 1
+
+                # Escape dismisses menus too.
+                ctx_open[] = true
+                Rocks.perform_render!(root); Rocks.run_effects!()
+                wins = sync_windows!(root)
+                ev = Ref{Rocks.SDL_Event}()
+                p = Base.unsafe_convert(Ptr{Rocks.SDL_Event}, ev)
+                Rocks.setproperty!(p, :type, UInt32(Rocks.SDL_KEYDOWN))
+                key = Rocks.SDL_KeyboardEvent(UInt32(Rocks.SDL_KEYDOWN),
+                    UInt32(0), UInt32(wins[1].host.id), UInt8(0), UInt8(0),
+                    UInt8(0), UInt8(0),
+                    Rocks.SDL_Keysym(SDL_Scancode(0), UInt32(SDLK_ESCAPE),
+                                     Cuint(0), 0))
+                unsafe_store!(Rocks.getproperty(p, :key), key)
+                @assert SDL_PushEvent(p) >= 0
+                drain_events!()
+                Rocks.perform_render!(root)
+                Rocks.run_effects!()
+                wins = sync_windows!(root)
+                @test !ctx_open[]
+                @test count(w -> w.host isa Rocks.WindowState, wins) == 1
             end
 
             function TipApp()
@@ -1920,6 +1999,156 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 field.props[:on_key_mods]("Left", 0x0001)
                 field.props[:on_key]("Delete")
                 @test text[] == "Xtwowords"
+            end
+        end
+
+        @testset "selection resets on blur" begin
+            text = Observable("a small field")
+            function SelApp()
+                @rock E.TextBox(text = text, width = 240)
+            end
+            with_tree(SelApp) do root
+                field = first(f for f in collect_kind(root, Pressable)
+                              if haskey(f.props, :on_key_mods))
+                sel_boxes() = [b for b in collect_kind(root, Box)
+                               if get(b.props, :position, nothing) === :absolute &&
+                                  get(b.props, :background, nothing) ==
+                                  E.light_theme().colors.selection]
+                t = E.light_theme()
+                # Focus the field and select the whole content.
+                Rocks.FOCUSED[] = field
+                Rocks.perform_render!(root)
+                Rocks.run_effects!()
+                field.props[:on_key_mods]("Home", 0x0000)
+                field.props[:on_key_mods]("End", 0x0001)
+                Rocks.perform_render!(root)
+                Rocks.run_effects!()
+                @test length(sel_boxes()) == 1
+                # Blurring collapses the selection back to the caret.
+                Rocks.FOCUSED[] = nothing
+                Rocks.perform_render!(root)
+                Rocks.run_effects!()
+                Rocks.perform_render!(root)
+                Rocks.run_effects!()
+                @test isempty(sel_boxes())
+            end
+        end
+
+        @testset "text mouse selection and edit menu" begin
+            text = Observable("copy me")
+            function MouseApp()
+                @rock Window(@rock E.TextBox(text = text, width = 200);
+                             width = 300, height = 80)
+            end
+            with_tree(MouseApp) do root
+                t = E.light_theme()
+                tw(s) = Rocks.Enterprise.text_width(s, t)
+                sync_windows!(root)
+                field = first(f for f in collect_kind(root, Pressable)
+                              if haskey(f.props, :on_key_mods))
+                fx, fy, _, _ = field.rect
+                rowx = first(collect_kind(root, Row)).rect[1]
+                caret() = [b for b in collect_kind(root, Box) if
+                           get(b.props, :position, nothing) === :absolute &&
+                           get(b.props, :background, nothing) == t.colors.text &&
+                           float(get(b.props, :width, 0)) == 1.0]
+                sels() = [b for b in collect_kind(root, Box) if
+                          get(b.props, :position, nothing) === :absolute &&
+                          get(b.props, :background, nothing) == t.colors.selection]
+                # Clicking right after the "copy " prefix places the caret
+                # there (the caret box sits one selected char in).
+                push_mouse!(field, Rocks.SDL_MOUSEBUTTONDOWN,
+                            round(Int, rowx + tw("copy ") - 1),
+                            round(Int, fy + 10))
+                drain_events!()
+                Rocks.perform_render!(root)
+                Rocks.run_effects!()
+                sync_windows!(root)
+                # A hovered text field shows the I-beam pointer.
+                @test SDL_GetCursor() == Rocks.TEXT_CURSOR[]
+                # The click completes: the caret stays at the boundary.
+                push_mouse!(field, Rocks.SDL_MOUSEBUTTONUP,
+                            round(Int, rowx + tw("copy ") - 1),
+                            round(Int, fy + 10))
+                drain_events!()
+                Rocks.perform_render!(root)
+                Rocks.run_effects!()
+                sync_windows!(root)
+                @test length(caret()) == 1
+                @test isapprox(caret()[1].rect[1] - rowx,
+                               tw("copy ") + 1; atol = 2.0)
+                # Hovering off the field (and other pressables) falls back to
+                # the arrow pointer.
+                push_motion!(field, 200, 60)
+                drain_events!()
+                Rocks.perform_render!(root)
+                Rocks.run_effects!()
+                sync_windows!(root)
+                @test SDL_GetCursor() == Rocks.ARROW_CURSOR[]
+
+                # Hold-and-drag selects: press after the "c" and drag to the
+                # end → selection "opy me".
+                s0 = round(Int, rowx + tw("c") - 1)
+                push_mouse!(field, Rocks.SDL_MOUSEBUTTONDOWN, s0,
+                            round(Int, fy + 10))
+                drain_events!()
+                Rocks.perform_render!(root)
+                Rocks.run_effects!(); sync_windows!(root)
+                push_motion!(field, round(Int, rowx + tw("copy me")) + 30, round(Int, fy + 10))
+                push_mouse!(field, Rocks.SDL_MOUSEBUTTONUP,
+                            round(Int, rowx + tw("copy me")) + 30,
+                            round(Int, fy + 10))
+                drain_events!()
+                Rocks.perform_render!(root)
+                Rocks.run_effects!(); sync_windows!(root)
+                @test length(sels()) == 1
+                @test isapprox(sels()[1].rect[3],
+                               tw("opy me"); atol = 3.0)
+                # Copy through the field's right-click menu.
+                push_mouse!(field, Rocks.SDL_MOUSEBUTTONDOWN,
+                            round(Int, rowx + 5), round(Int, fy + 10);
+                            button = 3)
+                drain_events!()
+                Rocks.perform_render!(root)
+                Rocks.run_effects!(); sync_windows!(root)
+                # The right-button release must not disturb the selection
+                # (the caret used to jump to the click point on release and
+                # collapse the drag selection).
+                push_mouse!(field, Rocks.SDL_MOUSEBUTTONUP,
+                            round(Int, rowx + 5), round(Int, fy + 10);
+                            button = 3)
+                drain_events!()
+                Rocks.perform_render!(root)
+                Rocks.run_effects!(); sync_windows!(root)
+                @test length(sels()) == 1
+                @test isapprox(sels()[1].rect[3], tw("opy me"); atol = 3.0)
+                copy_item = pressable_with(root, "Copy")
+                @test copy_item !== nothing
+                copy_item.props[:on_press]()
+                @test Rocks.Enterprise.clipboard_get_text() == "opy me"
+                # The item press closes the menu; re-render so the overlay is
+                # gone before the next interaction.
+                Rocks.perform_render!(root)
+                Rocks.run_effects!()
+                sync_windows!(root)
+                @test pressable_with(root, "Copy") === nothing
+
+                # Paste through the menu at the start of the field.
+                push_mouse!(field, Rocks.SDL_MOUSEBUTTONDOWN,
+                            round(Int, rowx - 2), round(Int, fy + 10))
+                drain_events!()
+                Rocks.perform_render!(root)
+                Rocks.run_effects!(); sync_windows!(root)
+                push_mouse!(field, Rocks.SDL_MOUSEBUTTONDOWN,
+                            round(Int, rowx + 5), round(Int, fy + 10);
+                            button = 3)
+                drain_events!()
+                Rocks.perform_render!(root)
+                Rocks.run_effects!(); sync_windows!(root)
+                paste_item = pressable_with(root, "Paste")
+                @test paste_item !== nothing
+                paste_item.props[:on_press]()
+                @test text[] == "opy mecopy me"
             end
         end
 
