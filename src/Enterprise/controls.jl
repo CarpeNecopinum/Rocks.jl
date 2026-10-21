@@ -87,44 +87,205 @@ end
 
 """
     Enterprise.TextBox(; text, read_only = false, password = false,
-                       placeholder, width, height, on_submit, disabled)
+                       placeholder, width, height, disabled, on_submit,
+                       on_change)
 
-A sunken white single-line text field with a caret, Backspace/Return handling
-and optional password masking.
+A sunken white single-line text field with full editing support: a visible
+caret, left/right/Home/End cursor movement (Ctrl+arrows jump whole words),
+Shift selection, Backspace/Delete, Return submitting and the system clipboard
+(Ctrl+A select all, Ctrl+C copy, Ctrl+X cut, Ctrl+V paste). Clicking inside
+the field places the caret at the nearest character boundary. `text` is an
+`Observable{String}`; `on_change()` fires after every edit.
 """
 function TextBox(; text, read_only = false, password = false, placeholder = "",
-                 width = 160, height = nothing, on_submit = () -> nothing,
-                 disabled = false)
+                  width = 160, height = nothing, disabled = false,
+                  on_submit = () -> nothing, on_change = () -> nothing)
     text isa Observable ||
         error("Enterprise.TextBox needs an `Observable` as its `text` prop")
     t = theme()
     text = @use text
+    # Cursor and selection positions are character counts. The Observables are
+    # tied to this fiber; the `-1` sentinel means "at the end of the current
+    # text", so externally set text keeps appending the way the old field did.
+    cur = @use Observable(-1)
+    anchor = @use Observable(-1)
     focused = has_focus()
     h = something(height, t.metrics.input_height)
+    edit = !disabled && !read_only
+
+    # Editing state is re-read inside callbacks so queued events act on the
+    # current text and cursor, not on values captured during render.
+    state() = begin
+        cs = collect(text[])
+        n = cur[] < 0 ? length(cs) : clamp(cur[], 0, length(cs))
+        m = anchor[] < 0 ? n : clamp(anchor[], 0, length(cs))
+        (cs, n, m, min(n, m), max(n, m))
+    end
+    move!(dest; extend = false) = begin
+        dest = clamp(dest, 0, length(collect(text[])))
+        if extend
+            n = cur[] < 0 ? length(collect(text[])) : cur[]
+            anchor[] = anchor[] < 0 ? n : anchor[]
+        else
+            anchor[] = -1
+        end
+        cur[] = dest
+        return nothing
+    end
+    word_step!(fwd; extend = false) = begin
+        (cs, n, m, lo, hi) = state()
+        dest = n
+        if fwd
+            dest < length(cs) && isspace(cs[dest+1]) && (dest += 1)
+            while dest < length(cs) && !isspace(cs[dest+1]); dest += 1; end
+        else
+            dest > 0 && isspace(cs[dest]) && (dest -= 1)
+            while dest > 0 && !isspace(cs[dest]); dest -= 1; end
+            # dest is now the separator slot right before the word start —
+            # a valid caret in the chars-before-couter semantics.
+        end
+        move!(dest; extend)
+    end
+    insert!(s) = begin
+        edit || return nothing
+        s = replace(s, r"[\r\n]" => "")
+        s == "" && return nothing
+        (cs, n, m, lo, hi) = state()
+        text[] = String([cs[1:lo]; collect(s); cs[hi+1:end]])
+        cur[] = lo + length(collect(s))
+        anchor[] = -1
+        on_change()
+        return nothing
+    end
+    # `forward = true` deletes the character after the caret (the Delete key),
+    # otherwise the one before it (Backspace); a selection is deleted as a
+    # whole either way.
+    delete!(forward = false) = begin
+        edit || return nothing
+        (cs, n, m, lo, hi) = state()
+        if lo < hi
+            kept = [cs[1:lo]; cs[hi+1:end]]
+        elseif forward
+            n < length(cs) || return nothing
+            kept = [cs[1:n]; cs[n+2:end]]
+        else
+            n > 0 || return nothing
+            kept = [cs[1:n-1]; cs[n+1:end]]
+        end
+        text[] = String(kept)
+        cur[] = lo < hi ? lo : forward ? n : n - 1
+        anchor[] = -1
+        on_change()
+        return nothing
+    end
+    select!(n, m) = begin
+        total = length(collect(text[]))
+        cur[] = clamp(n, 0, total)
+        anchor[] = clamp(m, 0, total)
+        return nothing
+    end
+    # With no selection the whole text is copied (the line is the field).
+    copy!() = begin
+        (cs, n, m, lo, hi) = state()
+        clipboard_set_text!(lo < hi ? String(cs[lo+1:hi]) : text[])
+        return nothing
+    end
+
+    # ---- render ------------------------------------------------------------
+    placeholder === nothing && (placeholder = "")
     value = text[]
-    display = password ? repeat("●", length(value)) : value
-    content = value == "" && !focused && placeholder != "" ?
-              text_element(placeholder; color = t.colors.disabled_text,
-                           size = t.metrics.font_size, font = t.font) :
-              text_element(display; color = t.colors.text,
-                           size = t.metrics.font_size, font = t.font)
-    caret = focused && !read_only ? (@rock Box(;
-        width = 1, height = max(h - 6, 4),
-        background = t.colors.text)) : nothing
-    field = @rock Row(content, caret; gap = 1, align = :center)
+    chars = collect(value)
+    n = cur[] < 0 ? length(chars) : clamp(cur[], 0, length(chars))
+    m = anchor[] < 0 ? n : clamp(anchor[], 0, length(chars))
+    lo, hi = min(n, m), max(n, m)
+    selection = lo < hi
+    mask(s) = password ? repeat("●", length(collect(s))) : s
+    before = mask(join(chars[1:n]))
+    span = mask(join(chars[lo+1:hi]))
+    after = mask(join(chars[hi+1:end]))
+
+    piece(str, color) = str == "" ? nothing :
+        text_element(str; color = color, size = t.metrics.font_size, font = t.font)
+    show_placeholder = value == "" && !focused && placeholder != ""
+    content = show_placeholder ?
+              Any[text_element(placeholder; color = t.colors.disabled_text,
+                               size = t.metrics.font_size, font = t.font)] :
+              Any[piece(before, t.colors.text),
+                  piece(span, selection ? t.colors.selection_text :
+                                          t.colors.text),
+                  piece(after, t.colors.text)]
+    caret = focused ? (@rock Box(; position = :absolute,
+        x = t.metrics.border + 6 + text_width(before, t), y = 3, width = 1,
+        height = max(h - 6, 4), background = t.colors.text)) : nothing
+    selbg = selection ? (@rock Box(; position = :absolute,
+        x = t.metrics.border + 6 + text_width(before, t), y = 3,
+        width = max(text_width(span, t), 1.0), height = max(h - 6, 4),
+        background = t.colors.selection)) : nothing
+    row = @rock Row(content...; gap = 0, align = :center)
+
     return Element(
         _PRESSABLE,
         props_dict(
-            :on_text_input => (disabled || read_only) ? (s) -> nothing :
-                (s) -> (text[] = text[] * s),
+            :on_text_input => edit ? (s) -> begin
+                # Ignore text delivered from Ctrl/Alt/Gui combos; plain typed
+                # characters arrive without those modifiers.
+                LAST_KEYMODS[] & 0x0F00 == 0x0000 || return nothing
+                insert!(s)
+            end : (s) -> nothing,
             :on_key => disabled ? (k) -> nothing : (k) -> begin
                 if k == "Backspace" && !read_only
-                    isempty(text[]) || (text[] = chop(text[]))
+                    delete!()
+                elseif k == "Delete" && !read_only
+                    delete!(true)
                 elseif k == "Return"
                     on_submit()
                 elseif k == "Escape"
                     unfocus!()
                 end
+            end,
+            :on_key_mods => disabled ? nothing : (k, mods) -> begin
+                ctrl = (mods & 0x00C0) != 0     # left/right CTRL
+                shift = (mods & 0x0003) != 0    # left/right SHIFT
+                if k == "Left" || k == "Right"
+                    fwd = k == "Right"
+                    ctrl ? word_step!(fwd; extend = shift) :
+                           move!(state()[2] + (fwd ? 1 : -1); extend = shift)
+                    return :handled
+                elseif k == "Home"
+                    move!(0; extend = shift)
+                    return :handled
+                elseif k == "End"
+                    move!(length(collect(text[])); extend = shift)
+                    return :handled
+                elseif ctrl && k in ("a", "A")
+                    select!(0, length(collect(text[])))
+                    return :handled
+                elseif ctrl && k in ("c", "C")
+                    copy!()
+                    return :handled
+                elseif ctrl && k in ("x", "X")
+                    copy!()
+                    delete!()
+                    return :handled
+                elseif ctrl && k in ("v", "V")
+                    edit && insert!(clipboard_get_text())
+                    return :handled
+                end
+                nothing
+            end,
+            :on_press => disabled ? () -> nothing : (px, py) -> begin
+                # Place the caret at the clicked character boundary; the row
+                # rect already covers border and padding.
+                roww = max(get(row.measured, 1, 0.0), 0.0)
+                x = clamp(px - row.rect[1], 0.0, roww)
+                acc, pos = 0.0, 0
+                for (i, c) in enumerate(collect(text[]))
+                    w = text_width(string(c), t)
+                    acc + w / 2 <= x || break
+                    acc += w
+                    pos = i
+                end
+                select!(pos, pos)
             end,
             :disabled => disabled,
             :background => t.colors.input,
@@ -142,8 +303,30 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
             :direction => :row,
             :align => :center,
         ),
-        Any[field],
+        Any[selbg, caret, row],
     )
+end
+
+function clipboard_set_text!(s)
+    s == "" && return
+    try
+        SDL_SetClipboardText(s)
+    catch err
+        @warn "Rocks: could not set the clipboard text" err
+    end
+    return nothing
+end
+
+function clipboard_get_text()
+    try
+        p = SDL_GetClipboardText()
+        (p === nothing || p == C_NULL) && return ""
+        s = unsafe_string(p)
+        SDL_free(p)
+        return s
+    catch
+        return ""
+    end
 end
 
 # ---- CheckBox / RadioButton ----------------------------------------------
@@ -168,6 +351,7 @@ function CheckBox(; checked, label = "", on_change = () -> nothing,
         checked_border = t.colors.input_border,
         unchecked_border = t.colors.input_border,
         check_color = color, check_size = 11, label_color = color,
+        label_size = t.metrics.font_size,
         font = t.font, marker_bevel = :sunken,
         bevel_light = t.colors.border_light,
         bevel_dark = t.colors.border_dark)
@@ -176,8 +360,9 @@ end
 """
     Enterprise.RadioButton(; selected, value, label, on_change, disabled)
 
-A 13px sunken radio button. `selected` is an `Observable{Int}` and `value` is
-the index this button writes when clicked.
+A 13px sunken radio button with a themed focus ring and a small center dot.
+`selected` is an `Observable{Int}` and `value` is the index this button writes
+when clicked.
 """
 function RadioButton(; selected, value, label = "", on_change = () -> nothing,
                      disabled = false)
@@ -188,11 +373,13 @@ function RadioButton(; selected, value, label = "", on_change = () -> nothing,
     color = label_color(t, disabled)
     return Mechanics.Radio(; selected = selected, value = value,
         on_change = on_change, disabled = disabled, label = label,
-        size = 13, border_width = 1,
+        size = 13, border_width = 2, dot_size = 5,
         selected_ring = t.colors.focus, unselected_ring = t.colors.input_border,
-        dot_color = t.colors.text, label_color = color, font = t.font,
-        marker_bevel = :sunken, bevel_light = t.colors.border_light,
-        bevel_dark = t.colors.border_dark)
+        dot_color = t.colors.text, label_color = color,
+        label_size = t.metrics.font_size, font = t.font,
+        # Bevel highlights are cut as straight strips, which reads as square
+        # notches in a circle — a plain ring looks right.
+        marker_bevel = :none)
 end
 
 # ---- GroupBox / Panel -----------------------------------------------------
@@ -206,7 +393,11 @@ function GroupBox(; title = "", children = Any[], caption_background = nothing,
                   padding = (8, 10), fill = false, width = nothing,
                   height = nothing)
     t = theme()
-    bg = something(caption_background, t.colors.control)
+    # The caption notch must match the surface the group sits on (Winforms:
+    # the caption inherits the parent's BackColor). Pages are document-colored,
+    # so that is the default; `caption_background` overrides it for groups on
+    # other surfaces.
+    bg = something(caption_background, t.colors.document)
     caption = @rock Box(
         text_element(title; color = t.colors.text, size = t.metrics.font_size,
                      font = t.font);
@@ -291,7 +482,10 @@ function SplitContainer(; children = Any[], direction = :horizontal,
     return Element(
         _SPLIT,
         props_dict(:direction => Symbol(direction), :ratio => ratio,
-                   :handle => handle, :handle_color => t.colors.border,
+                   :handle => handle, :handle_color => t.colors.border_dark,
+                   :handle_bevel => :raised,
+                   :bevel_light => t.colors.border_light,
+                   :bevel_dark => t.colors.border_dark,
                    :width => width, :height => height),
         flat_children(children),
     )
@@ -313,7 +507,10 @@ function Slider(; value, min = 0, max = 1, width = 200, ticks = 0)
         _SLIDER,
         props_dict(
             :value => value, :min => min, :max => max,
-            :width => width, :height => 24,
+            :width => width,
+            # Extra height so the tick marks sit below the knob instead of
+            # crossing its bottom edge.
+            :height => ticks > 0 ? 30 : 24,
             :track_color => t.colors.progress_track,
             :active_color => t.colors.progress_track,
             :track_height => 4,

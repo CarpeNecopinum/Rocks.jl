@@ -21,12 +21,17 @@ mutable struct ScrollState
     viewport_extent::Float64
     track_rect::Tuple{Float64,Float64,Float64,Float64}
     thumb_rect::Tuple{Float64,Float64,Float64,Float64}
+    # Rects of the arrow buttons at the start (up/left) and stop (down/right)
+    # ends of the scrollbar; empty when the scrollbar is invisible.
+    arrow_a_rect::Tuple{Float64,Float64,Float64,Float64}
+    arrow_b_rect::Tuple{Float64,Float64,Float64,Float64}
     drag_start_offset::Float64
     drag_start_pos::Float64
 end
 
 ScrollState(offset, max_offset, content_extent, viewport_extent) =
     ScrollState(offset, max_offset, content_extent, viewport_extent,
+                (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0),
                 (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0), 0.0, 0.0)
 
 # `scrollbar = true` / `:vertical` / `:horizontal` adds a compact visible
@@ -160,10 +165,14 @@ function measure!(fiber)
             measure!(child)
         end
     end
-    pw = get(fiber.props, :width, nothing)
-    ph = get(fiber.props, :height, nothing)
-    pw !== nothing && (w = float(pw))
-    ph !== nothing && (h = float(ph))
+    # Same guard as above: an explicitly sized window is sized by its real
+    # (possibly user-resized) OS size, not by its creation props.
+    if !is_window(fiber)
+        pw = get(fiber.props, :width, nothing)
+        ph = get(fiber.props, :height, nothing)
+        pw !== nothing && (w = float(pw))
+        ph !== nothing && (h = float(ph))
+    end
     fiber.measured = (w, h)
     return fiber.measured
 end
@@ -389,20 +398,38 @@ function place_scroll!(fiber, dir, gap, p, align, justify, x, y, w, h)
     state.offset = clamp(state.offset, 0.0, state.max_offset)
     state.track_rect = (0.0, 0.0, 0.0, 0.0)
     state.thumb_rect = (0.0, 0.0, 0.0, 0.0)
+    state.arrow_a_rect = (0.0, 0.0, 0.0, 0.0)
+    state.arrow_b_rect = (0.0, 0.0, 0.0, 0.0)
     sb = scrollbar_direction(fiber)
     sbw = float(get(fiber.props, :scrollbar_width, 17))
     if sb !== nothing && sb === :vertical && state.max_offset > 0
+        # Win7-style scrollbar: an arrow button at each end; the thumb travels
+        # between them.
+        arrow = sbw
+        travel = max(h - 2arrow, 0.0)
         thumb_h = max(24.0, h * state.viewport_extent / max(state.content_extent, 1.0))
-        thumb_h = min(thumb_h, h)
-        thumb_y = y + (h - thumb_h) * (state.offset / state.max_offset)
-        state.track_rect = (x + w - sbw, y, sbw, h)
-        state.thumb_rect = (x + w - sbw + 1, thumb_y, sbw - 2, thumb_h)
+        thumb_h = min(thumb_h, max(travel, 24.0))
+        thumb_y = travel > 24.0 ?
+                  y + arrow + (travel - thumb_h) * (state.offset / state.max_offset) :
+                  y + arrow
+        state.track_rect = (x + w - sbw, y + arrow, sbw, travel)
+        # The thumb spans the full scrollbar width like the arrow buttons (the
+        # 1px stroke paints over the track edges, matching the Win7 look).
+        state.thumb_rect = (x + w - sbw, thumb_y, sbw, thumb_h)
+        state.arrow_a_rect = (x + w - sbw, y, sbw, arrow)
+        state.arrow_b_rect = (x + w - sbw, y + h - arrow, sbw, arrow)
     elseif sb !== nothing && sb === :horizontal && state.max_offset > 0
+        arrow = sbw
+        travel = max(w - 2arrow, 0.0)
         thumb_w = max(24.0, w * state.viewport_extent / max(state.content_extent, 1.0))
-        thumb_w = min(thumb_w, w)
-        thumb_x = x + (w - thumb_w) * (state.offset / state.max_offset)
-        state.track_rect = (x, y + h - sbw, w, sbw)
-        state.thumb_rect = (thumb_x, y + h - sbw + 1, thumb_w, sbw - 2)
+        thumb_w = min(thumb_w, max(travel, 24.0))
+        thumb_x = travel > 24.0 ?
+                  x + arrow + (travel - thumb_w) * (state.offset / state.max_offset) :
+                  x + arrow
+        state.track_rect = (x + arrow, y + h - sbw, travel, sbw)
+        state.thumb_rect = (thumb_x, y + h - sbw, thumb_w, sbw)
+        state.arrow_a_rect = (x, y + h - sbw, arrow, sbw)
+        state.arrow_b_rect = (x + w - arrow, y + h - sbw, arrow, sbw)
     end
     offset_x = dir === :horizontal ? state.offset : 0.0
     offset_y = dir === :column ? state.offset : 0.0
@@ -469,17 +496,24 @@ end
 function place_absolute_children!(fiber, x, y, w, h)
     for child in fiber.children
         is_absolute_child(child) || continue
+        dx = float(get(child.props, :x, 0))
+        dy = float(get(child.props, :y, 0))
         if get(child.props, :fill, false)
             fw = get(child.props, :width, nothing)
             fh = get(child.props, :height, nothing)
+            bottom = get(child.props, :bottom, nothing)
+            # A fill child stretches to the parent box; with a `bottom` inset
+            # (and no explicit height) it instead spans from its `y` offset
+            # down to the parent's bottom edge minus the inset, so overlays
+            # like a status bar keep their room when the window resizes.
+            fh === nothing && bottom !== nothing &&
+                (fh = max(h - dy - float(bottom), 0.0))
             child.measured = (fw === nothing ? w : float(fw),
                               fh === nothing ? h : float(fh))
         end
         cw, ch = child.measured
         calign = Symbol(get(child.props, :anchor,
                             get(child.props, :align, :top_left)))
-        dx = float(get(child.props, :x, 0))
-        dy = float(get(child.props, :y, 0))
         if calign === :center
             place!(child, x + (w - cw) / 2, y + (h - ch) / 2)
         elseif calign === :bottom

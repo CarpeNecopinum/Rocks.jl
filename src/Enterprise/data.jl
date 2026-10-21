@@ -15,9 +15,22 @@ function TabControl(; tabs = Any[], selected, children = Any[],
     t = theme()
     selected = @use selected
     kids = flat_children(children)
+    # Tab widths match the Pressable box math (padding_x 12 on both sides —
+    # the 1px border paints over the box edge and is not measured) so the seam
+    # patch can be positioned exactly.
+    tab_w(text) = text_width(string(text), t) + 24
     tabbar = Any[]
+    seam_x = 0.0
+    seam_w = 0.0
+    xoff = 0.0
     for (i, tab) in enumerate(tabs)
         active = selected[] == i
+        w = tab_w(tab)
+        if active
+            seam_x = xoff
+            seam_w = w
+        end
+        xoff += w + 2 # 2px gap between tabs
         push!(tabbar, @rock Pressable(
             text_element(tab; color = t.colors.text,
                          size = t.metrics.font_size, font = t.font);
@@ -27,8 +40,21 @@ function TabControl(; tabs = Any[], selected, children = Any[],
             pressed_background = active ? t.gradients.tab_selected : t.gradients.button_pressed,
             border_color = t.colors.border, border_width = 1,
             radius = (t.metrics.control_radius, t.metrics.control_radius, 0, 0),
-            height = t.metrics.tab_height, padding_x = 12, padding_y = 0,
+            height = active ? t.metrics.tab_height + 2 : t.metrics.tab_height,
+            padding_x = 12, padding_y = 0,
             direction = :row, align = :center, justify = :center))
+    end
+    # The raised page paints a top border under the tabs; paint the selected
+    # tab over the whole seam band (its early bottom ring, the blank raise row
+    # below it and the page's top border slice) so the tab melts into the page,
+    # keeping the tab's side borders and the page's side borders intact
+    # (the bottom-aligned taller selected tab is what makes the seam visible).
+    seam = Any[]
+    if seam_w > 0
+        push!(seam, @rock Box(;
+            position = :absolute, x = seam_x + 1,
+            y = t.metrics.tab_height, width = seam_w - 2, height = 3,
+            background = t.colors.document))
     end
     content = length(kids) >= selected[] && selected[] >= 1 ? kids[selected[]] : nothing
     page = @rock Box(
@@ -41,10 +67,9 @@ function TabControl(; tabs = Any[], selected, children = Any[],
         _BOX,
         props_dict(:direction => :column, :gap => 0, :align => :start,
                    :fill => fill),
-        Any[
-            (@rock Box(tabbar...; direction = :row, gap = 2, align = :end)),
+        Any[(@rock Box(tabbar...; direction = :row, gap = 2, align = :end)),
             page,
-        ],
+            seam...],
     )
 end
 
@@ -160,15 +185,16 @@ end
 
 """
     Enterprise.GridView(; columns, rows, selected, on_select, sortable = true,
-                        width = 460, height = 240)
+                        width = 460, height = 240, fill = false)
 
 A grid with a gradient header, gridlines, selection, sorting and a scrollbar.
 `columns` is a vector of `(label, width)` or `(label, width, align)` tuples;
 `rows` is a vector of tuples/vectors. `selected` is an `Observable{Int}`.
+With `fill = true` the last column stretches so the grid spans `width`.
 """
 function GridView(; columns = Any[], rows = Any[], selected,
                   on_select = (i) -> nothing, sortable = true,
-                  width = 460, height = 240)
+                  width = 460, height = 240, fill = false)
     selected isa Observable ||
         error("Enterprise.GridView needs an `Observable` as its `selected` prop")
     t = theme()
@@ -176,6 +202,12 @@ function GridView(; columns = Any[], rows = Any[], selected,
     sort_col = @use Observable(0)
     sort_desc = @use Observable(false)
     cols = [grid_column(c) for c in columns]
+    if fill && length(cols) >= 2
+        fixed = sum(w for (_, w, _) in cols[1:length(cols)-1]; init = 0.0)
+        last_label, _, last_align = cols[end]
+        cols = [cols[1:length(cols)-1]...,
+                (last_label, max(width - 2 - fixed, 40.0), last_align)]
+    end
     order = collect(1:length(rows))
     if sortable && sort_col[] >= 1 && sort_col[] <= length(cols) && !isempty(rows)
         key(i) = begin
@@ -277,9 +309,9 @@ function ComboBox(; items = Any[], selected, on_change = () -> nothing,
     value = isempty(labels) ? "" : labels[sel]
     drop = @rock Pressable(
         text_element("▼"; color = t.colors.text,
-                     size = t.metrics.font_size, font = t.font);
+                     size = 9, font = t.font);
         on_press = () -> open[] = !open[],
-        position = :absolute, anchor = :top_right, x = 0, y = 0,
+        position = :absolute, anchor = :top_right, x = 0, y = 1,
         width = 18, height = t.metrics.input_height - 2,
         background = t.gradients.input_button,
         border_color = t.colors.border, border_width = 1,
@@ -316,17 +348,20 @@ function ComboBox(; items = Any[], selected, on_change = () -> nothing,
             direction = :row, align = :center))
     end
     popup = open[] ?
-        (@rock Box(entries...;
-            position = :absolute, x = 0, y = t.metrics.input_height,
-            width = width,
-            background = t.colors.document,
-            border_color = t.colors.border, border_width = 1,
-            bevel = :raised, radius = 0,
-            padding = 2, direction = :column, gap = 0)) : nothing
+            (@rock Box(entries...;
+                position = :absolute, x = 0, y = t.metrics.input_height,
+                width = width, height = 4 + length(entries) * t.metrics.row_height,
+                background = t.colors.document,
+                border_color = t.colors.border, border_width = 1,
+                bevel = :raised, radius = 0,
+                padding = 2, direction = :column, gap = 0)) : nothing
+    shadows = open[] ? popup_shadows(0, t.metrics.input_height, width,
+                                     4 + length(entries) * t.metrics.row_height) :
+               Any[]
     return Element(
         _BOX,
         props_dict(:width => width, :height => t.metrics.input_height,
                    :direction => :column, :overflow => :visible),
-        Any[field, popup],
+        Any[field, shadows..., popup],
     )
 end

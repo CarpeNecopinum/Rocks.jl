@@ -54,6 +54,10 @@ function sync_windows!(root)
         Rocks.measure!(w)
         Rocks.place!(w, 0.0, 0.0)
     end
+    # Mirror the runtime loop: close OS windows whose fibers left the tree.
+    for (_, f) in collect(pairs(Rocks.WINDOW_BY_ID))
+        f in windows || Rocks.destroy_window!(f)
+    end
     return windows
 end
 
@@ -1648,6 +1652,56 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 @test pressable_with(root, "Exit") === nothing
             end
 
+            # Menu titles stay flat — including on hover (no highlight, so the
+            # plastic bar look survives) — and carry the recessed plastic
+            # highlight only while their menu is open.
+            with_tree(MenuApp) do root
+                sync_windows!(root)
+                tt = E.light_theme()
+                file() = first(p for p in collect_kind(root, Pressable)
+                               if text_of(p) == "File" &&
+                                  get(p.props, :width, nothing) !== nothing)
+                @test get(file().props, :background, nothing) === nothing
+                # No hover highlight while closed…
+                @test get(file().props, :hover_background, nothing) === nothing
+                file().props[:on_press]()
+                Rocks.perform_render!(root)
+                sync_windows!(root)
+                # …but the open title keeps its highlight under hover.
+                @test file().props[:background] == tt.gradients.item_hot
+                @test file().props[:hover_background] == tt.gradients.item_hot
+                @test file().props[:border_color] == tt.colors.hot_border
+                file().props[:on_press]()
+                Rocks.perform_render!(root)
+                sync_windows!(root)
+                @test get(file().props, :background, nothing) === nothing
+            end
+
+            # Toolbar buttons: no hover highlight; highlight only while
+            # pressed, and toggles stay plastic-highlighted while on.
+            toggle = Observable(false)
+            function ToolToggle()
+                @rock E.ToolButton(label = "Bold", toggle = toggle)
+            end
+            with_tree(ToolToggle) do root
+                tt = E.light_theme()
+                btn = first(collect_kind(root, Pressable))
+                @test get(btn.props, :background, nothing) === nothing
+                # No hover highlight while off…
+                @test get(btn.props, :hover_background, nothing) === nothing
+                @test get(btn.props, :pressed_background, nothing) ==
+                    tt.gradients.item_hot
+                btn.props[:on_press]()
+                @test toggle[] == true
+                Rocks.perform_render!(root)
+                Rocks.run_effects!()
+                btn = first(collect_kind(root, Pressable))
+                @test btn.props[:background] == tt.gradients.item_hot
+                # A toggled-on button keeps its highlight under hover too.
+                @test btn.props[:hover_background] == tt.gradients.item_hot
+                @test btn.props[:border_color] == tt.colors.hot_border
+            end
+
             tool_clicks = Ref(0)
             function BarsApp()
                 toolbar = @rock E.ToolBar(
@@ -1673,25 +1727,45 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                         if get(b.props, :bevel, nothing) === :raised &&
                            get(b.props, :height, nothing) in (22, 28)]
                 @test length(bars) >= 2
+                # Resizing re-derives the client area: the scrolled client
+                # starts below the toolbar and stops above the status bar.
+                w = sync_windows!(root)[1]
+                sv = find_kind(root, E.ScrollView)
+                sv_y = sv.rect[2]
+                stat = only(c for c in w.children if
+                            c isa Rocks.Fiber &&
+                            get(c.props, :anchor, nothing) === :bottom_left)
+                w.host.height = 120
+                w.host.needs_layout = true
+                Rocks.measure!(w)
+                Rocks.place!(w, 0.0, 0.0)
+                @test sv.rect[2] == sv_y             # still below the toolbar
+                @test sv.rect[2] + sv.rect[4] == stat.rect[2]  # above status
             end
 
             open = Observable(true)
             result = Observable(:none)
             function DialogApp()
-                @rock Window(
-                    @rock E.MessageBox(open = open, title = "Confirm",
-                        message = "Proceed?", buttons = :okcancel,
-                        result = result, position = :absolute, fill = true);
-                    width = 300, height = 200)
+                @rock E.MessageBox(open = open, title = "Confirm",
+                    message = "Proceed?", buttons = :okcancel,
+                    result = result)
             end
             with_tree(DialogApp) do root
-                sync_windows!(root)
+                # The dialog mounts as its own OS window.
+                wins = sync_windows!(root)
+                @test count(w -> w.host isa Rocks.WindowState, wins) == 1
                 @test occursin("Proceed?", text_of(root))
+                dwin = wins[1]
+                @test get(dwin.props, :title, "") == "Confirm"
+                @test get(dwin.props, :resizable, true) == false
                 pressable_with(root, "OK").props[:on_press]()
                 @test result[] == :ok
                 @test !open[]
                 Rocks.perform_render!(root)
+                wins = sync_windows!(root)
                 @test pressable_with(root, "OK") === nothing
+                # The dialog window closed with it.
+                @test count(w -> w.host isa Rocks.WindowState, wins) == 0
             end
 
             ctx_open = Observable(true)
@@ -1743,6 +1817,10 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 @test sv.host.max_offset == 200
                 @test sv.host.track_rect[3] == 17
                 @test sv.host.thumb_rect[4] > 0
+                # The thumb spans the full scrollbar width like the arrow
+                # buttons (the stroke paints over the track edges).
+                @test sv.host.thumb_rect[3] == 17
+                @test sv.host.thumb_rect[1] == sv.host.arrow_a_rect[1]
                 before = sv.host.offset
                 tx, ty, tw, th = sv.host.track_rect
                 push_mouse!(sv, Rocks.SDL_MOUSEBUTTONDOWN,
@@ -1750,6 +1828,225 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 drain_events!()
                 sync_windows!(root)
                 @test sv.host.offset > before
+            end
+
+            # Win7-style scrollbar: arrow buttons at each end. Clicking the
+            # bottom arrow steps the viewport down; the top arrow steps up.
+            with_tree(ScrollApp) do root
+                w = sync_windows!(root)[1]
+                sv = find_kind(w, ScrollView)
+                a, b = sv.host.arrow_a_rect, sv.host.arrow_b_rect
+                @test a[4] == 17 && b[4] == 17
+                @test a[2] == 0
+                @test b[2] + b[4] == 100
+                @test sv.host.track_rect[2] == a[4]
+                push_mouse!(sv, Rocks.SDL_MOUSEBUTTONDOWN,
+                            round(Int, b[1] + b[3] / 2),
+                            round(Int, b[2] + b[4] / 2))
+                drain_events!()
+                sync_windows!(root)
+                @test sv.host.offset > 0
+                push_mouse!(sv, Rocks.SDL_MOUSEBUTTONDOWN,
+                            round(Int, a[1] + a[3] / 2),
+                            round(Int, a[2] + a[4] / 2))
+                drain_events!()
+                sync_windows!(root)
+                @test sv.host.offset == 0
+            end
+        end
+
+        @testset "window resize re-layout" begin
+            function ResizeApp()
+                @rock Window(
+                    @rock Box(fill = true, position = :absolute, height = 40,
+                              background = (1.0, 1.0, 1.0));
+                    width = 300, height = 200)
+            end
+            with_tree(ResizeApp) do root
+                w = sync_windows!(root)[1]
+                @test w.measured[1] == 300
+                # What one SDL_WINDOWEVENT_RESIZED frame does: the host already
+                # carries the new OS size and a full re-layout re-derives the
+                # tree from it (the creation width must not win).
+                w.host.width = 500
+                Rocks.measure!(w)
+                @test w.measured[1] == 500
+                Rocks.place!(w, 0.0, 0.0)
+                bar = find_kind(w, Box)
+                @test bar.rect[3] == 500
+            end
+        end
+
+        @testset "text input editing" begin
+            text = Observable("Hello world")
+            submitted = Ref(0)
+            function EditApp()
+                @rock E.TextBox(text = text, width = 240,
+                                on_submit = () -> submitted[] += 1)
+            end
+            with_tree(EditApp) do root
+                field = [f for f in collect_kind(root, Pressable)
+                         if haskey(f.props, :on_key_mods)][1]
+                # Plain keys: Backspace at the caret end removes the last
+                # character; typing goes wherever the caret sits.
+                field.props[:on_key_mods]("End", 0)
+                field.props[:on_key]("Backspace")
+                @test text[] == "Hello worl"
+                field.props[:on_key_mods]("Home", 0)
+                field.props[:on_text_input]("J")
+                @test text[] == "JHello worl"
+                # Shift+End selects forward from the Home caret; Backspace
+                # wipes the selection.
+                field.props[:on_key_mods]("End", 0x0001)
+                field.props[:on_key]("Backspace")
+                # The selection ran from the caret (after the inserted "J")
+                # to the end, so only "J" survives.
+                @test text[] == "J"
+                # Ctrl+A select-all, then type over it.
+                field.props[:on_text_input]("abc def")
+                field.props[:on_key_mods]("a", 0x0040)
+                field.props[:on_text_input]("X")
+                @test text[] == "X"
+                # Ctrl+Left jumps to the start of the current word.
+                field.props[:on_text_input]("two words") # "X" + "two words"
+                @test text[] == "Xtwo words"
+                field.props[:on_key_mods]("End", 0)
+                field.props[:on_key_mods]("Left", 0x0040) # before "words"
+                field.props[:on_key]("Backspace")         # eats the separator
+                @test text[] == "Xtwowords"
+                field.props[:on_text_input](" ")          # types it back
+                @test text[] == "Xtwo words"
+                # Shift+Left selects the separator; Delete wipes it.
+                field.props[:on_key_mods]("Left", 0x0001)
+                field.props[:on_key]("Delete")
+                @test text[] == "Xtwowords"
+            end
+        end
+
+        @testset "slider knob and ticks" begin
+            value = Observable(2.0)
+            function TickApp()
+                @rock Window(
+                    @rock Slider(value = value, min = 0, max = 4, width = 100,
+                                 ticks = 4, tick_color = (1.0, 0.0, 0.0));
+                    width = 100, height = 24)
+            end
+            with_tree(TickApp) do root
+                # A second render cycle stabilizes the freshly built tree.
+                win = sync_windows!(root)[1]
+                Rocks.perform_render!(root)
+                Rocks.run_effects!()
+                win = sync_windows!(root)[1]
+                path = joinpath(mktempdir(), "slider.png")
+                Rocks.screenshot(win, path)
+                isred(px) = px[1] > 200 && px[2] < 200
+                bg = (0x1f, 0x1f, 0x24, 0xff) # the default window background
+                # Ticks sit exactly where the knob's center lands: at value 2
+                # the middle tick, knob center and x=50 agree; the end ticks
+                # sit a half-knob in from the widget edges (which the knob
+                # cannot reach — the old mapping put ticks at x=0 and x=100).
+                @test isred(png_pixel(path, 7, 22))
+                @test isred(png_pixel(path, 51, 22))
+                @test isred(png_pixel(path, 95, 22))
+                @test png_pixel(path, 1, 22) == bg
+                @test png_pixel(path, 100, 22) == bg
+            end
+        end
+
+        @testset "tab seam and label sizes" begin
+            tab = Observable(1)
+            function SeamApp()
+                @rock E.ThemeContext.provider(
+                    @rock E.TabControl(tabs = ["A", "B"], selected = tab,
+                        children = Any[@rock E.Label("Alpha"),
+                                       @rock E.Label("Beta")],
+                        fill = true);
+                    value = E.light_theme())
+            end
+            with_tree(SeamApp) do root
+                t = E.light_theme()
+                # The selected tab is two pixels taller (Winforms raise).
+                tall = [p for p in collect_kind(root, Pressable) if
+                        float(get(p.props, :height, 0)) ==
+                        float(t.metrics.tab_height + 2)]
+                @test length(tall) == 1
+                # A three-pixel patch paints over the seam band under the
+                # selected tab (its bottom ring, the blank raise row and the
+                # page's top border slice) so the tab merges into the page;
+                # the tab's side border columns stay untouched.
+                seams() = [b for b in collect_kind(root, Box) if
+                           get(b.props, :position, nothing) === :absolute &&
+                           float(get(b.props, :height, 0)) == 3.0]
+                @test length(seams()) == 1
+                @test seams()[1].props[:background] == t.colors.document
+                @test float(seams()[1].props[:x]) == 1
+                @test float(seams()[1].props[:y]) == float(t.metrics.tab_height)
+                tab[] = 2
+                Rocks.perform_render!(root)
+                @test length(seams()) == 1
+                @test float(seams()[1].props[:x]) > 0
+            end
+
+            function LabelsTheme()
+                @rock E.ThemeContext.provider(
+                    @rock E.Column(
+                        @rock E.CheckBox(checked = Observable(true),
+                                         label = "Check"),
+                        @rock E.RadioButton(selected = Observable(1),
+                                            value = 1, label = "One");
+                        gap = 8);
+                    value = E.light_theme())
+            end
+            with_tree(LabelsTheme) do root
+                fs = float(E.light_theme().metrics.font_size)
+                for needle in ("Check", "One")
+                    hits = [tx for tx in collect_kind(root, Text) if
+                            Rocks.text_content(tx) == needle]
+                    @test length(hits) == 1
+                    @test float(hits[1].props[:size]) == fs
+                end
+            end
+        end
+
+        @testset "tab seam geometry" begin
+            tab = Observable(2)
+            function SeamWin()
+                @rock Window(
+                    E.ThemeContext.provider(
+                        children = Any[
+                            E.TabControl(tabs = ["A", "B", "C"],
+                                         selected = tab,
+                                         children = Any[E.Label(; text = "One"),
+                                                        E.Label(; text = "Two"),
+                                                        E.Label(; text = "Three")],
+                                         fill = true)],
+                        value = E.light_theme());
+                    width = 200, height = 120)
+            end
+            with_tree(SeamWin) do root
+                t = E.light_theme()
+                sync_windows!(root)
+                tab[] = 3
+                Rocks.perform_render!(root)
+                sync_windows!(root)
+                seams() = [b for b in collect_kind(root, Box) if
+                           get(b.props, :position, nothing) === :absolute &&
+                           float(get(b.props, :height, 0)) == 3.0]
+                @test length(seams()) == 1
+                # No cumulative drift: the patch hugs the placed tab exactly
+                # one pixel inside on the x sides, however late in the strip
+                # the selected tab runs.
+                tabs = [p for p in collect_kind(root, Pressable) if
+                        float(get(p.props, :height, 0)) in
+                        (float(t.metrics.tab_height),
+                         float(t.metrics.tab_height + 2))]
+                raised = [p for p in tabs if
+                          p.rect[4] == float(t.metrics.tab_height + 2)]
+                @test length(tabs) == 3
+                @test length(raised) == 1
+                patch = seams()[1]
+                @test patch.rect[1] == raised[1].rect[1] + 1
+                @test patch.rect[3] == raised[1].rect[3] - 2
             end
         end
     end

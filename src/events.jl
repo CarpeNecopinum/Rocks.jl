@@ -16,6 +16,10 @@ const HOVERED = Dict{UInt32,Fiber}()
 "windowID -> last pointer position (wheel events carry no coordinates)"
 const LAST_POINTER = Dict{UInt32,Tuple{Float64,Float64}}()
 
+# Raw SDL modifier flags (`KMOD_*` bits) of the most recent `SDL_KEYDOWN`, so
+# text fields can distinguish Ctrl-combos from plain typed characters.
+const LAST_KEYMODS = Ref(Cuint(0))
+
 const HAND_CURSOR = Ref{Ptr{SDL_Cursor}}(C_NULL)
 const ARROW_CURSOR = Ref{Ptr{SDL_Cursor}}(C_NULL)
 
@@ -156,6 +160,36 @@ function find_scrollbar_track(target, x, y)
     return nothing
 end
 
+"Invoke a press callback, passing the pointer position when the callback takes
+two arguments (e.g. text fields that place their caret where you click)."
+function callback_press!(props, name::Symbol, x, y)
+    f = get(props, name, nothing)
+    f isa Function || return
+    try
+        hasmethod(f, Tuple{Any,Any}) ? f(x, y) : f()
+    catch err
+        @warn "Rocks: callback :$name failed" exception = (err, catch_backtrace())
+    end
+    return nothing
+end
+
+"The scrollable fiber whose scrollbar arrow button contains the point (the
+bitwise `:start` is the top/left arrow, `:stop` the bottom/right one), or
+`nothing` when the press misses the arrows."
+function find_scrollbar_arrow(target, x, y)
+    f = target
+    while f !== nothing
+        if is_scrollable(f) && f.host isa ScrollState
+            st = f.host
+            inside(st.arrow_a_rect, x, y) && return (f, :start)
+            inside(st.arrow_b_rect, x, y) && return (f, :stop)
+        end
+        is_window(f) && return nothing
+        f = f.parent
+    end
+    return nothing
+end
+
 function drag_start!(fiber, x, y)
     if fiber.kind === _SPLIT
         fiber.host isa SplitState || return
@@ -222,7 +256,12 @@ function slider_drag_update!(fiber, x, y)
     hi > lo || return
     rx, _, rw, _ = fiber.rect
     rw <= 0 && return
-    frac = clamp((x - rx) / rw, 0.0, 1.0)
+    # The knob center travels across `rw - knob_w` pixels, so map pointer
+    # positions onto that interval (a plain `frac` makes the thumbnail lag
+    # the cursor by half the knob width and the end ticks unreachable).
+    knob_w = float(get(fiber.props, :thumb_width, 0)) > 0 ? 0.0 :
+             float(get(fiber.props, :thumb_size, 12))
+    frac = clamp((x - rx - knob_w / 2) / max(rw - knob_w, 1.0), 0.0, 1.0)
     new = lo + frac * (hi - lo)
     value[] = new
     mark_window_layout!(fiber)
@@ -398,6 +437,19 @@ function dispatch_event!(event::SDL_Event)
             request_render()
         end
 
+        # Scrollbar arrows step the viewport up/down..
+        arrow = find_scrollbar_arrow(target, mx, my)
+        if arrow !== nothing
+            pager, which = arrow
+            st = pager.host
+            step = max(st.viewport_extent * 0.15, 24.0)
+            st.offset = clamp(st.offset + (which === :start ? -step : step),
+                              0.0, st.max_offset)
+            callback(pager.props, :on_scroll, st.offset)
+            mark_window_layout!(pager)
+            return
+        end
+
         # Clicking the scrollbar track pages the viewport.
         pager = find_scrollbar_track(target, mx, my)
         if pager !== nothing
@@ -427,7 +479,7 @@ function dispatch_event!(event::SDL_Event)
         if pressable !== nothing && !Bool(get(pressable.props, :disabled, false))
             ACTIVE_PRESS[(wid, event.button.button)] = pressable
             pressable.host isa PressState && (pressable.host.pressed = true)
-            callback(pressable.props, :on_press_in)
+            callback_press!(pressable.props, :on_press_in, Float64(mx), Float64(my))
             mark_window_draw!(wid)
         end
     elseif ty == SDL_MOUSEBUTTONUP
@@ -444,7 +496,7 @@ function dispatch_event!(event::SDL_Event)
         callback(pressable.props, :on_press_out)
         if pressable.mounted && pressable.kind === _PRESSABLE &&
            inside(pressable.rect, mx, my) && !Bool(get(pressable.props, :disabled, false))
-            callback(pressable.props, :on_press)
+            callback_press!(pressable.props, :on_press, Float64(mx), Float64(my))
         end
         mark_window_draw!(wid)
     elseif ty == SDL_MOUSEMOTION
@@ -482,6 +534,25 @@ function dispatch_event!(event::SDL_Event)
         fiber === nothing && return
         target = keyboard_target(fiber)
         key = unsafe_string(SDL_GetKeyName(event.key.keysym.sym))
+        LAST_KEYMODS[] = event.key.keysym.mod
+        # `on_key_mods(key, mods)` sees the raw SDL modifier flags and wins:
+        # when it returns `:handled`, plain `on_key` is not called (this lets
+        # text fields own Ctrl+C/V/X/A and Shift+cursor selection).
+        if haskey(target.props, :on_key_mods)
+            handled = nothing
+            mf = target.props[:on_key_mods]
+            if mf isa Function
+                try
+                    handled = mf(key, Int(event.key.keysym.mod))
+                catch err
+                    @warn "Rocks: callback :on_key_mods failed" exception =
+                        (err, catch_backtrace())
+                end
+            end
+            handled === :handled || handled === nothing ||
+                @warn "Rocks: `on_key_mods` must return `:handled` or `nothing`"
+            handled === :handled && return
+        end
         callback(target.props, :on_key, key)
     elseif ty == SDL_KEYUP
         fiber = get(WINDOW_BY_ID, event.key.windowID, nothing)

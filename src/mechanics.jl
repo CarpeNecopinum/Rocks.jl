@@ -101,14 +101,14 @@ function Checkbox(; checked, on_change = () -> nothing, disabled = false,
                   checked_background = nothing, unchecked_background = nothing,
                   checked_border = nothing, unchecked_border = nothing,
                   border_width = 2, check_color = nothing, check_size = 14,
-                  label_color = nothing, font = nothing, marker_bevel = :none,
-                  bevel_light = nothing, bevel_dark = nothing)
+                  label_color = nothing, label_size = 16, font = nothing,
+                  marker_bevel = :none, bevel_light = nothing, bevel_dark = nothing)
     checked isa Observable ||
         error("Mechanics.Checkbox needs an `Observable` as its `checked` prop")
     on = checked[]
     label_kid = isempty(children) ?
                 (label == "" ? nothing :
-                 @rock Text(label; color = label_color)) :
+                 @rock Text(label; color = label_color, size = label_size)) :
                 @rock Row(flat_children(children)...; gap = 8, align = :center)
     if font !== nothing && label_kid isa Element && label_kid.kind === _TEXT
         label_kid.props[:font] = string(font)
@@ -220,15 +220,18 @@ The mechanics of a radio indicator: a pressable circle that sets
 """
 function Radio(; selected, value, on_change = () -> nothing, disabled = false,
                label = "", children = Any[], size = 20, border_width = 2,
-               selected_ring = nothing, unselected_ring = nothing,
-               dot_color = nothing, label_color = nothing, font = nothing,
+               dot_size = nothing, selected_ring = nothing,
+               unselected_ring = nothing,
+               dot_color = nothing, label_color = nothing, label_size = 16,
+               font = nothing,
                marker_bevel = :none, bevel_light = nothing, bevel_dark = nothing)
     selected isa Observable ||
         error("Mechanics.Radio needs an `Observable` as its `selected` prop")
     is_selected = selected[] == value
+    ds = something(dot_size, size - 2border_width)
     label_kid = isempty(children) ?
                 (label == "" ? nothing :
-                 @rock Text(label; color = label_color)) :
+                 @rock Text(label; color = label_color, size = label_size)) :
                 @rock Row(flat_children(children)...; gap = 8, align = :center)
     if font !== nothing && label_kid isa Element && label_kid.kind === _TEXT
         label_kid.props[:font] = string(font)
@@ -248,8 +251,8 @@ function Radio(; selected, value, on_change = () -> nothing, disabled = false,
         Any[
             @rock Box(
                 (is_selected ? (@rock Box(;
-                    width = size - 2border_width, height = size - 2border_width,
-                    radius = (size - 2border_width) / 2,
+                    width = ds, height = ds,
+                    radius = ds / 2,
                     background = dot_color)) : nothing);
                 width = size, height = size,
                 radius = size / 2,

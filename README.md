@@ -405,12 +405,34 @@ scrolls only the client area. `E.light_theme()` is the Aero-inspired default;
 `E.classic_theme()` and `E.high_contrast_theme()` are alternatives. Supply an
 `Observable{Theme}` to switch themes live.
 
-Menus and modal message boxes are transparent full-window overlays so their
-popups paint above page content. `Form` wires this automatically through its
-`menu` and `overlay` props; a standalone `ContextMenu` or `MenuBar` should be
+Menus stay transparent full-window overlays so their popups paint above page
+content, complete with a subtle drop shadow; clicking outside a menu closes
+it. Menu titles and toolbar buttons stay flat under the pointer — the
+recessed plastic highlight appears only while an item is pressed or its menu
+is open. `MessageBox` opens as its **own OS window** (native title bar and
+close button — the close button resolves like the Cancel choice, so no scrim
+is drawn over the parent window). `Form` wires the overlay or dialog window
+in automatically through its `menu` and `overlay` props; a standalone
+`ContextMenu` or `MenuBar` should be
 given `position = :absolute, fill = true`. A `ComboBox` popup is painted by
 the combo itself, so leave vertical room below it (or place it after
-potentially overlapping siblings).
+potentially overlapping siblings). `GridView` accepts `fill = true` to stretch
+its last column across the grid width, and `ToolTip` accepts `offset_y` to
+move the tip relative to the wrapped control.
+
+The desktop details are there too: `Form` windows are resizable and drag
+re-layout the page live, with the scrolled client ending above the status
+bar (which stays anchored to the bottom edge on any window size); scrollbars
+carry Win7-style arrow buttons at both ends (styled with
+`scrollbar_arrow_background` / `scrollbar_arrow_color`, clicking a page steps
+the viewport ~15%), over a darker recessed track with a flat thumb exactly as
+wide as the buttons; tab pages melt into their selected
+tab through a seam patch so no border line cuts through; `Slider` ticks mark
+the thumb travel exactly (the end ticks sit where the knob's center can
+reach); check/radio labels follow the theme's font size; and `TextBox` is a
+real editing field — caret and visible selection, Shift+arrows/Home/End,
+Ctrl+A/C/X/V against the SDL clipboard, Ctrl+←/→ word jumps and insert mode
+with the Return/Escape keys wired to focus handling.
 
 See `examples/enterprise.jl` for a full tour — menu bar, toolbar, tabs,
 group boxes, text fields, combo box, check/radio buttons, progress/slider,

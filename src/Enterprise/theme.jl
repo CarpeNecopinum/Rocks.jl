@@ -25,9 +25,9 @@ default_colors() = (
     disabled_bg = "#F0F0F0",
     selection_inactive = "#F0F0F0",
     tooltip = "#FFFFE1",
-    scrollbar_track = "#F0F0F0",
-    scrollbar_thumb_top = "#F7F7F7",
-    scrollbar_thumb_bottom = "#CFCFCF",
+    scrollbar_track = "#DCDCDC",
+    scrollbar_thumb_top = "#C9C9C9",
+    scrollbar_thumb_bottom = "#C9C9C9",
     scrollbar_border = "#A0A0A0",
     tab_selected = "#FFFFFF",
     tab_unselected_text = "#1A1A1A",
@@ -40,18 +40,22 @@ default_gradients() = (
     button = LinearGradient("#F5F5F5", "#DDDDDD"),
     button_hover = LinearGradient("#F8F8F8", "#E8E8E8"),
     button_pressed = LinearGradient("#D8D8D8", "#C4C4C4"),
+    # Win7 recessed highlight for pressed/opened menubar, toolbar and toggle
+    # items (blue plastic, bordered by `colors.hot_border`).
+    item_hot = LinearGradient("#CBE9F7", "#A5CDF2"),
     button_default = LinearGradient("#F5F9FF", "#DCE8F5"),
     button_default_hover = LinearGradient("#FAFCFF", "#E8F1FA"),
     button_default_pressed = LinearGradient("#DCE8F5", "#C8D8E8"),
     toolbar = LinearGradient("#F7F7F7", "#E7E7E7"),
     status = LinearGradient("#F5F5F5", "#E9E9E9"),
     tab = LinearGradient("#F2F2F2", "#E2E2E2"),
-    tab_selected = LinearGradient("#FFFFFF", "#F7F7F7"),
+    tab_selected = LinearGradient("#F5F5F5", "#FFFFFF"),
     grid_header = LinearGradient("#FAFAFA", "#E8E8E8"),
     progress = LinearGradient("#C8F0B8", "#5FBF4A"),
     input_button = LinearGradient("#F7F7F7", "#DCDCDC"),
     slider_thumb = LinearGradient("#FCFCFC", "#D8D8D8"),
-    scrollbar_thumb = LinearGradient("#F7F7F7", "#CFCFCF"),
+    scrollbar_thumb = "#C9C9C9",
+    scrollbar_button = LinearGradient("#FBFBFB", "#E8E8E8"),
 )
 
 default_metrics() = (

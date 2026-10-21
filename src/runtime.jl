@@ -143,6 +143,12 @@ function render(app; kwargs...)
                     w.host isa WindowState || create_window!(w)
                     sync_window!(w)
                 end
+                # Close OS windows whose fibers left the tree this render pass
+                # (e.g. a dialog component returned `nothing` after being
+                # dismissed).
+                for (_, f) in collect(pairs(WINDOW_BY_ID))
+                    f in windows || destroy_window!(f)
+                end
                 for w in windows
                     measure!(w)
                     place!(w, 0.0, 0.0)

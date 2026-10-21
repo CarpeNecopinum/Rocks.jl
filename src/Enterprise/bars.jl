@@ -93,15 +93,29 @@ function menu_item_row(item::MenuItem, t::Theme, close; width = 196)
         direction = :row, align = :center)
 end
 
+# Translucent offset rectangles that fake the classic Win7 popup drop shadow.
+function popup_shadows(x, y, w, h)
+    return Any[
+        (@rock Box(; position = :absolute, x = x + 2, y = y + 2,
+                   width = w + 1, height = h + 1,
+                   background = (0.0, 0.0, 0.0, 0.16))),
+        (@rock Box(; position = :absolute, x = x + 3, y = y + 3,
+                   width = w + 1, height = h + 1,
+                   background = (0.0, 0.0, 0.0, 0.10))),
+    ]
+end
+
 function menu_dropdown(items, t::Theme, close; x, y, width = 200)
     rows = Any[menu_item_row(normalize_item(i), t, close; width = width - 4)
                for i in items]
-    return (@rock Box(;
-        position = :absolute, x = x, y = y, width = width,
-        background = t.colors.document,
-        border_color = t.colors.border, border_width = 1,
-        bevel = :raised, radius = 0, padding = 2,
-        direction = :column, gap = 0, children = rows))
+    h = 4 + sum((normalize_item(i).label == "-" ? 5 : 22 for i in items), init = 0)
+    return Any[popup_shadows(x, y, width, h)...,
+               (@rock Box(;
+                   position = :absolute, x = x, y = y, width = width, height = h,
+                   background = t.colors.document,
+                   border_color = t.colors.border, border_width = 1,
+                   bevel = :raised, radius = 0, padding = 2,
+                   direction = :column, gap = 0, children = rows))]
 end
 
 # ---- MenuBar --------------------------------------------------------------
@@ -141,13 +155,19 @@ function MenuBar(; menus = Any[], position = :absolute, fill = true,
     buttons = Any[]
     for (i, m) in enumerate(entries)
         active = open_idx == i
+        # Flat until clicked: no hover highlight (it breaks the plastic look
+        # of the bar). Only the open menu gets the recessed plastic
+        # highlight, like Win7.
         push!(buttons, @rock Pressable(
             text_element(m.label; color = t.colors.text,
                          size = t.metrics.font_size, font = t.font);
             on_press = () -> open[] = active ? 0 : i,
-            background = active ? t.colors.hot : nothing,
-            hover_background = t.colors.hot,
-            pressed_background = t.colors.hot_border,
+            background = active ? t.gradients.item_hot : nothing,
+            hover_background = active ? t.gradients.item_hot : nothing,
+            pressed_background = t.gradients.item_hot,
+            border_color = active ? t.colors.hot_border : nothing,
+            border_width = 1,
+            radius = t.metrics.control_radius,
             width = widths[i], height = t.metrics.menu_height,
             padding_x = 8, padding_y = 0,
             direction = :row, align = :center, justify = :center))
@@ -161,9 +181,9 @@ function MenuBar(; menus = Any[], position = :absolute, fill = true,
         height = t.metrics.menu_height,
         padding = 0, direction = :row, align = :center)
     dropdown = open_idx >= 1 && open_idx <= length(entries) ?
-               menu_dropdown(entries[open_idx].items, t, close;
-                             x = xs[open_idx],
-                             y = t.metrics.menu_height) : nothing
+              menu_dropdown(entries[open_idx].items, t, close;
+                            x = xs[open_idx],
+                            y = t.metrics.menu_height) : Element[]
     scrim = open_idx == 0 ? nothing :
             (@rock Pressable(;
                 position = :absolute, fill = true,
@@ -173,7 +193,7 @@ function MenuBar(; menus = Any[], position = :absolute, fill = true,
         props_dict(:position => Symbol(position), :x => x, :y => y,
                    :fill => fill, :pointer_events => :none,
                    :direction => :column),
-        Any[scrim, row, dropdown],
+        Any[scrim, row, dropdown...],
     )
 end
 
@@ -200,7 +220,7 @@ function ContextMenu(; open, x = 0, y = 0, anchor_x = nothing, anchor_y = nothin
     close() = (open[] = false)
     px = anchor_x === nothing ? x : anchor_x
     py = anchor_y === nothing ? y : anchor_y
-    dropdown = menu_dropdown(items, t, close; x = px, y = py, width = width)
+    parts = menu_dropdown(items, t, close; x = px, y = py, width = width)
     scrim = @rock Pressable(; position = :absolute, fill = true,
                             on_press = close, background = nothing)
     return Element(
@@ -208,7 +228,7 @@ function ContextMenu(; open, x = 0, y = 0, anchor_x = nothing, anchor_y = nothin
         props_dict(:position => Symbol(position), :x => 0, :y => 0,
                    :fill => fill, :pointer_events => :none,
                    :direction => :column),
-        Any[scrim, dropdown],
+        Any[scrim, parts...],
     )
 end
 
@@ -257,6 +277,8 @@ function ToolButton(; icon = "", label = "", on_press = () -> nothing,
         text_element(label; color = enabled ? t.colors.text : t.colors.disabled_text,
                      size = t.metrics.font_size, font = t.font),
     ]
+    # Flat on hover (no highlight; it breaks the plastic look). The recessed
+    # plastic highlight only appears while pressed, or while a toggle is on.
     return @rock Pressable(
         kids...;
         on_press = () -> begin
@@ -265,10 +287,12 @@ function ToolButton(; icon = "", label = "", on_press = () -> nothing,
             on_press()
         end,
         disabled = disabled,
-        background = on ? t.colors.hot : nothing,
-        hover_background = enabled ? t.colors.hot : nothing,
-        pressed_background = enabled ? t.colors.hot_border : nothing,
-        border_color = nothing,
+        background = on ? t.gradients.item_hot : nothing,
+        hover_background = on ? t.gradients.item_hot : nothing,
+        pressed_background = enabled ? t.gradients.item_hot : nothing,
+        border_color = enabled && on ? t.colors.hot_border : nothing,
+        border_width = 1,
+        radius = t.metrics.control_radius,
         padding_x = 5, padding_y = 0,
         height = 24, direction = :row, align = :center, gap = 4)
 end
@@ -329,21 +353,23 @@ end
 # ---- ToolTip --------------------------------------------------------------
 
 """
-    Enterprise.ToolTip(; text, children)
+    Enterprise.ToolTip(; text, children, offset_y)
 
-Wrap a control in a hover tooltip. The tip is a non-interactive popup below
-the child.
+A wrap-in hover tooltip; the tip is a non-interactive popup drawn just below
+the wrapped control (`offset_y` positions it, default below a standard
+control).
 """
-function ToolTip(; text = "", children = Any[])
+function ToolTip(; text = "", children = Any[], offset_y = nothing)
     t = theme()
     hover = @use Observable(false)
     child = flat_children(children)
     isempty(child) && return nothing
+    oy = something(offset_y, t.metrics.button_height + 1)
     tip = hover[] && text != "" ?
           (@rock Box(
               text_element(text; color = t.colors.text,
                            size = t.metrics.font_size, font = t.font);
-              position = :absolute, x = 0, y = 18,
+              position = :absolute, x = 0, y = oy,
               padding_x = 4, padding_y = 2,
               background = t.colors.tooltip,
               border_color = t.colors.border, border_width = 1,

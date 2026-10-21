@@ -87,7 +87,7 @@ function GeneralPage(; fill = false)
         (@rock Labeled(; label = "Name:", control = name_field)),
         (@rock Labeled(; label = "Organization:", control = org_field)),
         (@rock Labeled(; label = "Department:", control = dept_combo));
-        title = "System", caption_background = t.colors.window, fill = true)
+        title = "System", fill = true)
 
     splash = @rock E.CheckBox(checked = check_splash,
                               label = "Show splash screen at startup")
@@ -96,7 +96,7 @@ function GeneralPage(; fill = false)
     telemetry = @rock E.CheckBox(checked = check_telemetry,
                                  label = "Send anonymous usage statistics")
     settings = @rock E.GroupBox(splash, updates, telemetry;
-        title = "Settings", caption_background = t.colors.window, fill = true)
+        title = "Settings", fill = true)
 
     small = @rock E.RadioButton(selected = radio_scale, value = 1,
                                 label = "Small (100%)")
@@ -106,7 +106,7 @@ function GeneralPage(; fill = false)
                                 label = "Large (150%)")
     radio_row = @rock Row(small, medium, large; gap = 16, align = :center)
     scaling = @rock E.GroupBox(radio_row;
-        title = "Display scaling", caption_background = t.colors.window,
+        title = "Display scaling",
         fill = true)
 
     progress_bar = @rock E.ProgressBar(value = progress, width = 420)
@@ -115,7 +115,7 @@ function GeneralPage(; fill = false)
     volume_label = @rock E.Label("Volume")
     progress_group = @rock E.GroupBox(
         progress_label, progress_bar, volume_label, volume_slider;
-        title = "Status", caption_background = t.colors.window, fill = true)
+        title = "Status", fill = true)
 
     apply = @rock E.Button("Apply"; on_press = () -> status_text[] = "Settings applied")
     cancel = @rock E.Button("Cancel")
@@ -127,13 +127,13 @@ function GeneralPage(; fill = false)
     recent = @rock E.ListView(items = RECENT_ITEMS, selected = recent_selected,
                               icons = true, width = 1040, height = 170)
     recent_group = @rock E.GroupBox(recent;
-        title = "Recent items", caption_background = t.colors.window, fill = true)
+        title = "Recent items", fill = true)
 
     last_check = @rock E.Label("Last check: today at 09:42")
     version = @rock E.Label("Version: 7.4.1 (build 2026.10)")
     maintenance_note = @rock E.Label("No maintenance tasks are currently scheduled.")
     maintenance = @rock E.GroupBox(last_check, version, maintenance_note;
-        title = "Maintenance", caption_background = t.colors.window, fill = true)
+        title = "Maintenance", fill = true)
 
     # Reserve transparent space below the combo box so its popup is not covered
     # by later siblings. `pointer_events = :none` keeps the popup hittable.
@@ -148,10 +148,11 @@ function FilesPage(; fill = false)
     list = @rock E.ListView(items = FILE_ITEMS, selected = list_selected,
                             icons = true, width = 440, height = 300)
     grid = @rock E.GridView(columns = GRID_COLUMNS, rows = GRID_ROWS,
-                            selected = grid_selected, width = 520, height = 300)
+                            selected = grid_selected, width = 585, height = 300,
+                            fill = true)
     browser = @rock E.Row(list, grid; gap = 12, align = :start)
     files = @rock E.GroupBox(browser;
-        title = "Files and folders", caption_background = t.colors.window,
+        title = "Files and folders",
         fill = true)
     refresh = @rock E.Button("Refresh"; icon = "refresh",
         on_press = () -> status_text[] = "File list refreshed")
@@ -168,7 +169,7 @@ function ControlsPage(; fill = false)
     icon = @rock E.Button("Open"; icon = "open")
     buttons = @rock E.GroupBox(
         (@rock Row(normal, default, disabled, icon; gap = 6, align = :center));
-        title = "Buttons", caption_background = t.colors.window, fill = true)
+        title = "Buttons", fill = true)
 
     tip_source = @rock E.Button("Hover for tooltip")
     tip = @rock E.ToolTip(tip_source; text = "A classic Win7 tooltip")
@@ -181,7 +182,7 @@ function ControlsPage(; fill = false)
     dialog = @rock E.Button("Show message box"; on_press = () -> message_open[] = true)
     misc = @rock E.GroupBox(
         (@rock Row(tip, link, context, dialog; gap = 8, align = :center));
-        title = "Menus and dialogs", caption_background = t.colors.window,
+        title = "Menus and dialogs",
         fill = true)
 
     left = @rock E.Panel(@rock E.Label("Left pane"); background = t.colors.document,
@@ -193,7 +194,7 @@ function ControlsPage(; fill = false)
     split = @rock E.SplitContainer(left, right; width = 1040, height = 170,
                                    ratio = 0.42)
     split_group = @rock E.GroupBox(split;
-        title = "Split container", caption_background = t.colors.window,
+        title = "Split container",
         fill = true)
 
     menu_items = [E.MenuItem(label = "Cut", shortcut = "Ctrl+X"),

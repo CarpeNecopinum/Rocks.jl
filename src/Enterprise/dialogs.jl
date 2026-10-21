@@ -2,17 +2,21 @@
 
 """
     Enterprise.MessageBox(; open, title, message, icon = :info, buttons = :ok,
-                          result, on_result)
+                          result, on_result, width = 380, height = nothing,
+                          position = :cascade, display = nothing)
 
-A modal Win7-style message box. `open` is an `Observable{Bool}`. The chosen
-button symbol is written to `result` (an optional `Observable{Symbol}`) and
-passed to `on_result`. `buttons` is `:ok`, `:okcancel`, `:yesno` or
-`:yesnocancel`.
+A modal Win7-style message box that opens as its **own OS window** (with a
+native title bar and close button) instead of drawing over its parent.
+`open` is an `Observable{Bool}`; the window closes when a button is pressed,
+through the OS close button (which resolves like the Cancel choice), or when
+`open` flips back to `false`. `position` / `display` pass straight to the
+window placement modes (`:cascade`, `:centered`, `:manual`, `:mouse`).
 """
 function MessageBox(; open, title = "", message = "", icon = :info,
                     buttons = :ok, result = nothing,
-                    on_result = (r) -> nothing, position = :absolute,
-                    fill = true, pointer_events = :none)
+                    on_result = (r) -> nothing, width = 380,
+                    height = nothing, position = :cascade,
+                    display = nothing)
     open isa Observable ||
         error("Enterprise.MessageBox needs an `Observable{Bool}` as `open`")
     t = theme()
@@ -35,56 +39,70 @@ function MessageBox(; open, title = "", message = "", icon = :info,
                      on_press = () -> finish(spec[2]))
         for spec in specs
     ]
+    # The OS title bar's X resolves like Winforms: Cancel if offered,
+    # otherwise No, otherwise the first choice.
+    syms = [s[2] for s in specs]
+    close_sym = :cancel in syms ? :cancel : (:no in syms ? :no : syms[1])
     icon_glyph = get(ICONS, string(icon), string(icon))
-    heading = @rock Row(
-        text_element(icon_glyph; color = t.colors.text,
-                     size = t.metrics.font_size + 6, font = t.font),
-        text_element(title; color = t.colors.text,
-                     size = t.metrics.font_size + 1, font = t.font);
-        gap = 10, align = :center)
-    dialog = @rock Box(
-        heading,
+    badge_bg = icon === :warning ? "#E8A33D" :
+               icon === :error ? "#D0452F" : "#3B7FC4"
+    badge_glyph = icon === :warning ? "#12100A" : "#FFFFFF"
+    badge = @rock Box(
+        text_element(icon_glyph; color = badge_glyph,
+                     size = t.metrics.font_size + 7, font = t.font);
+        width = 27, height = 27, radius = 13.5, background = badge_bg,
+        direction = :row, align = :center, justify = :center)
+    content = @rock Row(
+        badge,
         (@rock Box(
             text_element(message; color = t.colors.text,
                          size = t.metrics.font_size, font = t.font);
-            width = 348, direction = :column, align = :start)),
-        (@rock Box(
-            btns...;
-            direction = :row, gap = 6, align = :center, justify = :end,
-            fill = true));
-        width = 380, background = t.colors.control,
-        border_color = t.colors.border, border_width = 1,
-        bevel = :raised, radius = 4, padding = 16,
-        direction = :column, gap = 14)
+            width = width - 77, direction = :column, align = :start));
+        gap = 14, align = :start)
+    footer = @rock Box(
+        btns...;
+        direction = :row, gap = 8, align = :center, justify = :end)
+    # Size the window from the message's line count.
+    nlines = count(isequal('\n'), message) + 1
+    line_h = t.metrics.font_size + 8
+    body_h = max(nlines * line_h, 27.0)
+    h = height === nothing ?
+        18.0 + body_h + 14.0 + t.metrics.button_height + 18.0 : float(height)
+    dialog = @rock Box(
+        content, footer;
+        direction = :column, gap = 12, padding = 18,
+        background = t.colors.control, fill = true)
     return Element(
-        _BOX,
-        props_dict(:position => Symbol(position), :x => 0, :y => 0,
-                   :fill => fill,
-                   :background => (0.0, 0.0, 0.0, 0.35),
-                   :direction => :column, :align => :center, :justify => :center),
+        _WINDOW,
+        props_dict(:title => title, :width => width, :height => h,
+                   :background => t.colors.control, :padding => 1,
+                   :direction => :column, :position => Symbol(position),
+                   :display => display, :resizable => false,
+                   :on_close => () -> finish(close_sym)),
         Any[dialog],
     )
 end
 
 """
     Enterprise.Form(; menu, toolbar, status, children, title = "",
-                    width = 900, height = 600, resizable = false, padding = 12,
+                    width = 900, height = 600, resizable = true, padding = 12,
                     on_scroll)
 
 A complete application window scaffold: optional menu bar, toolbar, scrolling
 client area and status bar on the theme's control background. The bars are
-pinned; only the client area scrolls.
+pinned; only the client area scrolls. The menu and toolbar stretch with the
+window and the status bar stays anchored to the bottom edge, so the frame
+tracks window resizes.
 """
 function Form(; menu = nothing, toolbar = nothing, status = nothing,
               children = Any[], overlay = nothing, title = "", width = 900,
-              height = 600, resizable = false, padding = 12,
+              height = 600, resizable = true, padding = 12,
               on_scroll = nothing)
     t = theme()
     menu_h = menu === nothing ? 0 : t.metrics.menu_height
     toolbar_h = toolbar === nothing ? 0 : t.metrics.toolbar_height
     status_h = status === nothing ? 0 : t.metrics.status_height
     content_y = menu_h + toolbar_h
-    content_h = max(height - content_y - status_h, 0)
     # Bars are component elements; fill lets their host box stretch to the
     # window width inside the absolute wrapper.
     toolbar !== nothing && toolbar isa Element &&
@@ -97,25 +115,29 @@ function Form(; menu = nothing, toolbar = nothing, status = nothing,
         menu.props[:x] = 0
         menu.props[:y] = 0
     end
-    if overlay isa Element && (overlay.kind === MessageBox ||
-                               overlay.kind === ContextMenu)
+    # Overlay dialogs (context menus) paint above everything as an absolute
+    # child; window-based dialogs (MessageBox) mount untouched as an extra
+    # window and receive their own wrap so they stay out of the window's own
+    # flow layout.
+    if overlay isa Element && overlay.kind === ContextMenu
         overlay.props[:position] = :absolute
         overlay.props[:fill] = true
         overlay.props[:pointer_events] = :none
     end
     toolbar_wrap = toolbar === nothing ? nothing :
-        Element(_BOX, props_dict(:position => :absolute, :x => 0, :y => menu_h,
-                                 :width => width, :height => toolbar_h,
+        Element(_BOX, props_dict(:position => :absolute, :x => 0,
+                                 :y => menu_h, :fill => true,
+                                 :height => toolbar_h,
                                  :direction => :column), Any[toolbar])
     status_wrap = status === nothing ? nothing :
-        Element(_BOX, props_dict(:position => :absolute, :x => 0,
-                                 :y => height - status_h, :width => width,
-                                 :height => status_h, :direction => :column),
+        Element(_BOX, props_dict(:position => :absolute, :anchor => :bottom_left,
+                                 :x => 0, :fill => true, :height => status_h,
+                                 :direction => :column),
                 Any[status])
     scroll = Element(
         _SCROLLVIEW,
         props_dict(:position => :absolute, :x => 0, :y => content_y,
-                   :width => width, :height => content_h,
+                   :fill => true, :bottom => status_h,
                    :background => t.colors.window,
                    :padding => padding, :gap => 8,
                    :direction => :column, :align => :start,
@@ -124,15 +146,25 @@ function Form(; menu = nothing, toolbar = nothing, status = nothing,
                    :scrollbar_track => t.colors.scrollbar_track,
                    :scrollbar_thumb => t.gradients.scrollbar_thumb,
                    :scrollbar_border => t.colors.scrollbar_border,
+                   :scrollbar_arrow_background => t.gradients.scrollbar_button,
+                   :scrollbar_arrow_color => t.colors.text,
                    :scrollbar_radius => 2,
                    :on_scroll => something(on_scroll, _ -> nothing)),
         flat_children(children),
     )
+    # A window-based overlay (MessageBox) mounts inside a transparent
+    # absolute wrapper so it stays out of the form's own flow layout.
+    overlay_child = overlay
+    if overlay isa Element && overlay.kind === MessageBox
+        overlay_child = Element(_BOX,
+                                props_dict(:position => :absolute),
+                                Any[overlay])
+    end
     return Element(
         _WINDOW,
         props_dict(:title => title, :width => width, :height => height,
                    :resizable => resizable, :background => t.colors.window,
                    :padding => 0, :direction => :column),
-        Any[toolbar_wrap, scroll, status_wrap, menu, overlay],
+        Any[toolbar_wrap, scroll, status_wrap, menu, overlay_child],
     )
 end

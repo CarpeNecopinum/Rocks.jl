@@ -449,6 +449,26 @@ function push_rim_band!(indices, m, a0, b0)
     return indices
 end
 
+"Fill a small triangle (a scrollbar arrow glyph) with `color`. `pointing` is
+`:up`, `:down`, `:left` or `:right`."
+function fill_triangle!(renderer, x, y, w, h, color; pointing = :up)
+    (w <= 0 || h <= 0) && return
+    c = geometry_color(color)
+    points = if Symbol(pointing) === :up
+        (SDL_FPoint(x + w / 2, y), SDL_FPoint(x + w, y + h), SDL_FPoint(x, y + h))
+    elseif Symbol(pointing) === :down
+        (SDL_FPoint(x, y), SDL_FPoint(x + w, y), SDL_FPoint(x + w / 2, y + h))
+    elseif Symbol(pointing) === :left
+        (SDL_FPoint(x, y + h / 2), SDL_FPoint(x + w, y), SDL_FPoint(x + w, y + h))
+    else
+        (SDL_FPoint(x + w, y + h / 2), SDL_FPoint(x, y + h), SDL_FPoint(x, y))
+    end
+    vertices = [geometry_vertex(p, c) for p in points]
+    indices = Cint[0, 1, 2]
+    SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
+    return nothing
+end
+
 """
     fill_round_rect(renderer, x, y, w, h, r, color)
 
@@ -883,16 +903,34 @@ function draw_scrollbar!(fiber, renderer)
     state isa ScrollState || return nothing
     tx, ty, tw, th = state.track_rect
     (tw <= 0 || th <= 0) && return nothing
-    track = get(fiber.props, :scrollbar_track, (0.94, 0.94, 0.94))
+    track = get(fiber.props, :scrollbar_track, (0.86, 0.86, 0.86))
     set_color(renderer, track)
     fill_rect(renderer, tx, ty, tw, th)
     set_color(renderer, get(fiber.props, :scrollbar_border, (0.65, 0.65, 0.65)))
     fill_rect(renderer, tx, ty, 1, th)
     fill_rect(renderer, tx, ty, tw, 1)
+    # The arrow buttons at both ends (Win7 style) sit on top of the track.
+    dir = scrollbar_direction(fiber)
+    arrow_bg = get(fiber.props, :scrollbar_arrow_background,
+                   LinearGradient("#FBFBFB", "#E8E8E8"))
+    arrow_color = get(fiber.props, :scrollbar_arrow_color, (0.25, 0.25, 0.25))
+    for (rect, pointing) in
+        ((state.arrow_a_rect,
+          dir === :horizontal ? :left : :up),
+         (state.arrow_b_rect,
+          dir === :horizontal ? :right : :down))
+        ax, ay, aw, ah = rect
+        (aw <= 0 || ah <= 0) && continue
+        fill_shape(renderer, ax, ay, aw, ah, 2, arrow_bg)
+        set_color(renderer, get(fiber.props, :scrollbar_border, (0.65, 0.65, 0.65)))
+        draw_rect_stroke(renderer, ax, ay, aw, ah, 1)
+        gw, gh = min(5.0, aw - 4.0), min(3.0, ah - 4.0)
+        fill_triangle!(renderer, ax + (aw - gw) / 2, ay + (ah - gh) / 2,
+                       gw, gh, arrow_color; pointing)
+    end
     hx, hy, hw, hh = state.thumb_rect
     (hw <= 0 || hh <= 0) && return nothing
-    thumb = get(fiber.props, :scrollbar_thumb,
-                LinearGradient("#F7F7F7", "#CFCFCF"))
+    thumb = get(fiber.props, :scrollbar_thumb, "#C9C9C9")
     fill_shape(renderer, hx, hy, hw, hh, get(fiber.props, :scrollbar_radius, 2), thumb)
     set_color(renderer, get(fiber.props, :scrollbar_border, (0.65, 0.65, 0.65)))
     draw_rect_stroke(renderer, hx, hy, hw, hh, 1)
@@ -945,13 +983,43 @@ function draw!(fiber, renderer)
     return nothing
 end
 
-# The draggable handle of a Split, drawn after its panes.
+# The draggable handle of a Split, drawn after its panes. Besides a flat
+# `handle_color`, `handle_bevel = :raised` (or `:sunken`) draws a Winforms
+# style grip: dark edge lines on both sides of a light core, oriented across
+# the split direction.
 function draw_split_handle!(fiber, renderer)
     state = fiber.host
     state isa SplitState || return
     hx, hy, hw, hh = state.handle_rect
-    set_color(renderer, get(fiber.props, :handle_color, (0.35, 0.35, 0.40)))
-    fill_rect(renderer, hx, hy, hw, hh)
+    props = fiber.props
+    bevel = Symbol(get(props, :handle_bevel, :none))
+    if bevel in (:raised, :sunken) && hw > 2 && hh > 2
+        light = get(props, :bevel_light, (1.0, 1.0, 1.0, 0.75))
+        dark = get(props, :bevel_dark, (0.0, 0.0, 0.0, 0.35))
+        first = bevel === :raised ? (dark, light) : (light, dark)
+        edge_first, edge_second = first[1], first[2]
+        horizontal = Symbol(get(props, :direction, :horizontal)) == :horizontal
+        if horizontal
+            set_color(renderer, edge_first)
+            fill_rect(renderer, hx, hy, 1, hh)
+            fill_rect(renderer, hx + hw - 1, hy, 1, hh)
+            set_color(renderer, edge_second)
+            fill_rect(renderer, hx + 1, hy, 1, hh)
+            fill_rect(renderer, hx + hw - 2, hy, 1, hh)
+            fill_rect(renderer, hx + 2, hy, max(hw - 4, 0.0), hh)
+        else
+            set_color(renderer, edge_first)
+            fill_rect(renderer, hx, hy, hw, 1)
+            fill_rect(renderer, hx, hy + hh - 1, hw, 1)
+            set_color(renderer, edge_second)
+            fill_rect(renderer, hx, hy + 1, hw, 1)
+            fill_rect(renderer, hx, hy + hh - 2, hw, 1)
+            fill_rect(renderer, hx, hy + 2, hw, max(hh - 4, 0.0))
+        end
+    else
+        set_color(renderer, get(props, :handle_color, (0.35, 0.35, 0.40)))
+        fill_rect(renderer, hx, hy, hw, hh)
+    end
     return nothing
 end
 
@@ -1044,8 +1112,13 @@ function draw_slider!(fiber, renderer)
         tick_color = get(props, :tick_color, (0.45, 0.45, 0.45))
         tick_len = float(get(props, :tick_length, 3))
         set_color(renderer, tick_color)
+        # Ticks sit where the knob's center lands for the respective value:
+        # the knob center travels across `w - knob_w` pixels, not the full
+        # width, so the first and last tick match the end knobs exactly.
+        knob_w = thumb_w > 0 ? 0.0 : float(get(props, :thumb_size, 12))
+        span = max(w - knob_w, 1.0)
         for i in 0:ticks
-            tx = x + w * (i / ticks)
+            tx = x + knob_w / 2 + span * (i / ticks)
             fill_rect(renderer, tx, y + h - tick_len, 1, tick_len)
         end
     end
