@@ -1410,6 +1410,350 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         end
     end
 
+    @testset "enterprise" begin
+        E = Rocks.Enterprise
+        text_of(f) = f.kind === Text ? Rocks.text_content(f) :
+                     join((text_of(c) for c in f.children), "")
+        function pressable_with(f, needle)
+            for p in collect_kind(f, Pressable)
+                occursin(needle, text_of(p)) && return p
+            end
+            return nothing
+        end
+
+        @testset "theme, gradients and primitives" begin
+            t = E.light_theme()
+            @test t.metrics.button_height == 23
+            @test t.gradients.button isa LinearGradient
+            @test E.classic_theme().gradients.button isa LinearGradient
+            @test E.high_contrast_theme().colors.border == "#000000"
+
+            function GradApp()
+                @rock Window(
+                    @rock Box(; width = 100, height = 100,
+                        background = LinearGradient("#000000", "#ffffff"));
+                    title = "gradient", width = 100, height = 100)
+            end
+            with_tree(GradApp) do root
+                sync_windows!(root)
+                path = joinpath(mktempdir(), "gradient.png")
+                Rocks.screenshot(root, path)
+                @test png_pixel(path, 50, 5)[1] < 20
+                @test png_pixel(path, 50, 95)[1] > 235
+            end
+
+            function HoriGradApp()
+                @rock Window(
+                    @rock Box(; width = 100, height = 100,
+                        background = LinearGradient("#000000", "#ffffff";
+                                                    direction = :horizontal));
+                    title = "gradient", width = 100, height = 100)
+            end
+            with_tree(HoriGradApp) do root
+                sync_windows!(root)
+                path = joinpath(mktempdir(), "hgradient.png")
+                Rocks.screenshot(root, path)
+                @test png_pixel(path, 5, 50)[1] < 20
+                @test png_pixel(path, 95, 50)[1] > 235
+            end
+
+            clicks = Ref(0)
+            function BtnApp()
+                @rock E.Button("OK"; default = true,
+                               on_press = () -> clicks[] += 1)
+            end
+            with_tree(BtnApp) do root
+                button = find_kind(root, Pressable)
+                @test button.props[:bevel] === :raised
+                @test button.props[:background] isa LinearGradient
+                button.props[:on_press]()
+                @test clicks[] == 1
+            end
+
+            # A pointer-transparent overlay lets events fall through to content
+            # below, while its own children stay hittable.
+            function OverlayApp()
+                under = @rock Box(
+                    @rock Pressable(; position = :absolute, x = 10, y = 10,
+                                    width = 40, height = 40,
+                                    on_press = () -> nothing);
+                    position = :absolute, fill = true, background = (1, 1, 1))
+                overlay = @rock Box(
+                    @rock Box(; position = :absolute, x = 60, y = 10,
+                              width = 20, height = 20, background = (1, 0, 0));
+                    position = :absolute, fill = true,
+                    pointer_events = :none)
+                @rock Window(under, overlay; width = 100, height = 100)
+            end
+            with_tree(OverlayApp) do root
+                w = sync_windows!(root)[1]
+                @test Rocks.hit_test(w, 20.0, 20.0).kind === Pressable
+                hit = Rocks.hit_test(w, 70.0, 20.0)
+                @test hit !== nothing && get(hit.props, :background, nothing) == (1, 0, 0)
+                hit = Rocks.hit_test(w, 90.0, 90.0)
+                @test hit !== nothing && get(hit.props, :background, nothing) == (1, 1, 1)
+            end
+
+            # `overflow = :visible` keeps positioned children hittable outside
+            # the parent's rect.
+            function OverflowApp()
+                child = @rock Pressable(; position = :absolute, x = 0, y = 30,
+                                        width = 20, height = 20,
+                                        on_press = () -> nothing)
+                box = @rock Box(child; position = :absolute, x = 10, y = 10,
+                                width = 50, height = 20, overflow = :visible)
+                @rock Window(box; width = 100, height = 100)
+            end
+            with_tree(OverflowApp) do root
+                w = sync_windows!(root)[1]
+                @test Rocks.hit_test(w, 20.0, 45.0).kind === Pressable
+            end
+        end
+
+        @testset "controls" begin
+            clicked = Ref(0)
+            text = Observable("Ada")
+            checked = Observable(false)
+            radio = Observable(1)
+            progress = Observable(0.25)
+            tab = Observable(1)
+            function App()
+                t = E.light_theme()
+                return @rock E.ThemeContext.provider(
+                    @rock E.Column(
+                        @rock E.Button("Go"; on_press = () -> clicked[] += 1),
+                        @rock E.TextBox(text = text),
+                        @rock E.CheckBox(checked = checked, label = "Check"),
+                        @rock E.RadioButton(selected = radio, value = 1,
+                                            label = "One"),
+                        @rock E.RadioButton(selected = radio, value = 2,
+                                            label = "Two"),
+                        @rock E.ProgressBar(value = progress, width = 100),
+                        @rock E.Slider(value = progress, width = 100, ticks = 8),
+                        @rock E.TabControl(tabs = ["A", "B"], selected = tab,
+                            children = Any[@rock E.Label("Alpha"),
+                                           @rock E.Label("Beta")],
+                            fill = true);
+                        gap = 8, fill = true);
+                    value = t)
+            end
+            with_tree(App) do root
+                go = pressable_with(root, "Go")
+                go.props[:on_press]()
+                @test clicked[] == 1
+
+                field = [f for f in collect_kind(root, Pressable)
+                         if haskey(f.props, :on_text_input)][1]
+                field.props[:on_text_input]("!")
+                @test text[] == "Ada!"
+                field.props[:on_key]("Backspace")
+                @test text[] == "Ada"
+
+                pressable_with(root, "Check").props[:on_press]()
+                @test checked[]
+                pressable_with(root, "Two").props[:on_press]()
+                @test radio[] == 2
+
+                slider = find_kind(root, Slider)
+                @test slider.props[:thumb_size] == 11
+                @test slider.props[:track_height] == 4
+                @test slider.props[:ticks] == 8
+
+                progress[] = 0.5
+                Rocks.perform_render!(root)
+                bar = [b for b in collect_kind(root, Box)
+                       if get(b.props, :background, nothing) ==
+                          E.light_theme().colors.progress_track &&
+                          get(b.props, :bevel, nothing) === :sunken][1]
+                @test bar.children[1].props[:width] == 48
+
+                pressable_with(root, "B").props[:on_press]()
+                @test tab[] == 2
+                Rocks.perform_render!(root)
+                @test occursin("Beta", text_of(root))
+                @test !occursin("Alpha", text_of(root))
+            end
+
+            # Password fields render bullets and still edit the real value.
+            password = Observable("secret")
+            function PasswordApp()
+                @rock E.TextBox(text = password, password = true)
+            end
+            with_tree(PasswordApp) do root
+                @test occursin("●●●●●●", text_of(root))
+            end
+        end
+
+        @testset "data controls" begin
+            list = Observable(0)
+            grid = Observable(0)
+            combo = Observable(1)
+            changed = Ref(0)
+            function DataApp()
+                @rock E.Column(
+                    @rock E.ListView(items = ["one", "two"], selected = list),
+                    @rock E.GridView(
+                        columns = [("Name", 80), ("Kind", 60)],
+                        rows = [("x", "a"), ("y", "b")], selected = grid),
+                    @rock E.ComboBox(items = ["one", "two"], selected = combo,
+                                     on_change = () -> changed[] += 1);
+                    gap = 8)
+            end
+            with_tree(DataApp) do root
+                pressable_with(root, "two").props[:on_press]()
+                @test list[] == 2
+                pressable_with(root, "y").props[:on_press]()
+                @test grid[] == 2
+
+                combo_component = find_kind(root, E.ComboBox)
+                field = first(p for p in collect_kind(combo_component, Pressable)
+                              if get(p.props, :width, nothing) == 160)
+                field.props[:on_press]()
+                Rocks.perform_render!(root)
+                combo_component = find_kind(root, E.ComboBox)
+                item = pressable_with(combo_component, "two")
+                @test item !== nothing
+                item.props[:on_press]()
+                @test combo[] == 2
+                @test changed[] == 1
+            end
+        end
+
+        @testset "bars and dialogs" begin
+            fired = Ref(0)
+            menus = [E.Menu("File", items = [
+                E.MenuItem(label = "Exit", on_press = () -> fired[] += 1),
+            ])]
+            function MenuApp()
+                @rock E.Form(
+                    @rock E.Label("Body");
+                    menu = (@rock E.MenuBar(menus = menus)),
+                    title = "menu", width = 300, height = 200)
+            end
+            with_tree(MenuApp) do root
+                sync_windows!(root)
+                # The menu bar's row is also pressable and contains every menu
+                # label; the actual menu button carries an explicit width.
+                file = first(p for p in collect_kind(root, Pressable)
+                             if text_of(p) == "File" &&
+                                get(p.props, :width, nothing) !== nothing)
+                file.props[:on_press]()
+                Rocks.perform_render!(root)
+                sync_windows!(root)
+                exit_item = pressable_with(root, "Exit")
+                @test exit_item !== nothing
+                exit_item.props[:on_press]()
+                @test fired[] == 1
+                Rocks.perform_render!(root)
+                @test pressable_with(root, "Exit") === nothing
+            end
+
+            tool_clicks = Ref(0)
+            function BarsApp()
+                toolbar = @rock E.ToolBar(
+                    (@rock E.ToolButton(label = "New", icon = "new",
+                        on_press = () -> tool_clicks[] += 1)),
+                    (@rock E.ToolSeparator()))
+                status = @rock E.StatusBar(panels = [
+                    E.StatusPanel(text = "Ready"),
+                    E.StatusPanel(text = "3 objects", width = 100),
+                ])
+                @rock E.Form(
+                    @rock E.Label("Client area");
+                    toolbar = toolbar, status = status,
+                    title = "bars", width = 320, height = 220)
+            end
+            with_tree(BarsApp) do root
+                sync_windows!(root)
+                @test occursin("Ready", text_of(root))
+                @test occursin("3 objects", text_of(root))
+                pressable_with(root, "New").props[:on_press]()
+                @test tool_clicks[] == 1
+                bars = [b for b in collect_kind(root, Box)
+                        if get(b.props, :bevel, nothing) === :raised &&
+                           get(b.props, :height, nothing) in (22, 28)]
+                @test length(bars) >= 2
+            end
+
+            open = Observable(true)
+            result = Observable(:none)
+            function DialogApp()
+                @rock Window(
+                    @rock E.MessageBox(open = open, title = "Confirm",
+                        message = "Proceed?", buttons = :okcancel,
+                        result = result, position = :absolute, fill = true);
+                    width = 300, height = 200)
+            end
+            with_tree(DialogApp) do root
+                sync_windows!(root)
+                @test occursin("Proceed?", text_of(root))
+                pressable_with(root, "OK").props[:on_press]()
+                @test result[] == :ok
+                @test !open[]
+                Rocks.perform_render!(root)
+                @test pressable_with(root, "OK") === nothing
+            end
+
+            ctx_open = Observable(true)
+            ctx_fired = Ref(0)
+            function ContextApp()
+                @rock Window(
+                    @rock E.ContextMenu(open = ctx_open, anchor_x = 10,
+                        anchor_y = 10, position = :absolute, fill = true,
+                        items = [E.MenuItem(label = "Copy",
+                            on_press = () -> ctx_fired[] += 1)]);
+                    width = 200, height = 150)
+            end
+            with_tree(ContextApp) do root
+                sync_windows!(root)
+                copy = pressable_with(root, "Copy")
+                @test copy !== nothing
+                copy.props[:on_press]()
+                @test ctx_fired[] == 1
+                @test !ctx_open[]
+            end
+
+            function TipApp()
+                @rock E.ToolTip((@rock E.Button("Hover")); text = "Tip text")
+            end
+            with_tree(TipApp) do root
+                @test !occursin("Tip text", text_of(root))
+                pressable_with(root, "Hover").props[:on_hover_in]()
+                Rocks.perform_render!(root)
+                @test occursin("Tip text", text_of(root))
+                pressable_with(root, "Hover").props[:on_hover_out]()
+                Rocks.perform_render!(root)
+                @test !occursin("Tip text", text_of(root))
+            end
+        end
+
+        @testset "scrollbars" begin
+            function ScrollApp()
+                @rock Window(
+                    @rock ScrollView(
+                        @rock Box(; width = 100, height = 300,
+                                  background = (1, 1, 1));
+                        position = :absolute, fill = true, scrollbar = true,
+                        scrollbar_width = 17);
+                    width = 100, height = 100)
+            end
+            with_tree(ScrollApp) do root
+                w = sync_windows!(root)[1]
+                sv = find_kind(w, ScrollView)
+                @test sv.host.max_offset == 200
+                @test sv.host.track_rect[3] == 17
+                @test sv.host.thumb_rect[4] > 0
+                before = sv.host.offset
+                tx, ty, tw, th = sv.host.track_rect
+                push_mouse!(sv, Rocks.SDL_MOUSEBUTTONDOWN,
+                            round(Int, tx + tw / 2), round(Int, ty + th - 5))
+                drain_events!()
+                sync_windows!(root)
+                @test sv.host.offset > before
+            end
+        end
+    end
+
     @testset "colors" begin
         @test Rocks._to_rgba((1.0, 0.0, 0.0)) == (0xff, 0x00, 0x00, 0xff)
         @test Rocks._to_rgba((255, 0, 0)) == (0xff, 0x00, 0x00, 0xff)

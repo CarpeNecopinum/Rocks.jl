@@ -204,12 +204,27 @@ Akin to React Native, styling is left to the user. Rocks provides primitives:
   components for directional boxes. `scroll = true` (or `:vertical` /
   `:horizontal`) turns a Box into a clipped scroll container; use
   **`ScrollView`** (below) for a named wrapper.
+
+  `background` (and the `hover_background`/`pressed_background` props of
+  `Pressable`) also accepts
+  `LinearGradient(top, bottom; direction = :vertical)`. `bevel` draws a
+  Win7-style edge — `:raised`, `:sunken`, `:etched` or `:none` — with
+  `bevel_light`/`bevel_dark` override colors. `overflow = :visible` lets
+  positioned children paint (and receive pointer events) outside the parent's
+  rect. `pointer_events = :none` makes a transparent overlay pass clicks
+  through to the content below while keeping its children hittable. These
+  primitives are used by `Rocks.Enterprise` and are available to custom
+  components too.
 * **`ScrollView`** — lays out like a `Box`, but clips its flow content to the
   viewport and scrolls it with the mouse wheel. `direction = :column` scrolls
   vertically (default), `:row` horizontally; `scroll_step` sets pixels per
   notch (default 48) and `on_scroll(offset)` reports the new offset. Give it a
   bounded size (`width`/`height`, or `position = :absolute, fill = true`).
-  Absolute children stay pinned to the viewport.
+  Absolute children stay pinned to the viewport. Set `scrollbar = true` to
+  show a draggable scrollbar (`scrollbar_width`, `scrollbar_track`,
+  `scrollbar_thumb`, `scrollbar_border`, `scrollbar_radius`); clicking the
+  track pages the viewport. Scrollbars are opt-in so ordinary scroll views
+  look unchanged.
 * **`Text`** — stringified children rendered with a TTF font. Props: `size`,
   `color`, `font`. Multi-line text uses `"\\n"`; the default font is
   auto-discovered (or set with `Rocks.set_default_font!(path)`, the
@@ -230,7 +245,8 @@ Akin to React Native, styling is left to the user. Rocks provides primitives:
   `Observable`, required), `min`, `max`, `width`, `height`, `color`,
   `on_change(value)`.
 
-Plus pre-styled components (Material-UI-inspired, built on the primitives):
+Plus pre-styled components (Material-UI-inspired, built on the primitives;
+see also the separate Windows 7 / Winforms set, `Rocks.Enterprise`, below):
 
 * **`Button`** — `variant` (`:contained`, `:outlined`, `:text`), `color`
   (`:primary`, `:secondary`, `:success`, `:error`, `:warning`, `:info`),
@@ -342,10 +358,76 @@ julia --project examples/material3.jl
 SDL_VIDEODRIVER=dummy julia --project examples/material3.jl   # headless
 ```
 
+## Windows 7 / Winforms components
+
+`Rocks.Enterprise` is a second, deliberately old-school component set: raised
+gradient buttons, sunken inputs, etched group boxes, menus, toolbars, status
+bars, tabs, list/grid views and more, all built on the same primitives and
+`Mechanics` as the Material 3 components.
+
+```julia
+using Rocks
+import Rocks.Enterprise
+const E = Rocks.Enterprise
+
+theme = Observable(E.light_theme())
+name = Observable("Ada Lovelace")
+enabled = Observable(true)
+
+function App()
+    @rock E.ThemeContext.provider(
+        @rock E.Form(
+            @rock E.Column(
+                @rock E.GroupBox(
+                    @rock E.TextBox(text = name),
+                    @rock E.CheckBox(checked = enabled, label = "Enabled");
+                    title = "General", fill = true),
+                @rock E.Button("Apply"; default = true);
+                gap = 12, fill = true);
+            menu = (@rock E.MenuBar(menus = [
+                E.Menu("File", items = [
+                    E.MenuItem(label = "Exit", on_press = Rocks.quit!),
+                ]),
+            ])),
+            title = "Utility", width = 640, height = 420);
+        value = theme)
+end
+
+render(App)
+```
+
+`Enterprise` provides `Button`, `LinkLabel`, `TextBox`, `CheckBox`,
+`RadioButton`, `GroupBox`, `Panel`, `ProgressBar`, `Slider`, `SplitContainer`,
+`TabControl`, `ListView`, `GridView`, `ComboBox`, `MenuBar`, `ContextMenu`,
+`ToolBar`, `StatusBar`, `ToolTip`, `MessageBox` and `Form`. `Form` is the
+application scaffold: it pins the optional menu/toolbar/status bars and
+scrolls only the client area. `E.light_theme()` is the Aero-inspired default;
+`E.classic_theme()` and `E.high_contrast_theme()` are alternatives. Supply an
+`Observable{Theme}` to switch themes live.
+
+Menus and modal message boxes are transparent full-window overlays so their
+popups paint above page content. `Form` wires this automatically through its
+`menu` and `overlay` props; a standalone `ContextMenu` or `MenuBar` should be
+given `position = :absolute, fill = true`. A `ComboBox` popup is painted by
+the combo itself, so leave vertical room below it (or place it after
+potentially overlapping siblings).
+
+See `examples/enterprise.jl` for a full tour — menu bar, toolbar, tabs,
+group boxes, text fields, combo box, check/radio buttons, progress/slider,
+list and grid views, split panes, tooltip, context menu, status bar and a
+message box:
+
+```shell
+julia --project examples/enterprise.jl
+SDL_VIDEODRIVER=dummy julia --project examples/enterprise.jl   # headless
+```
+
 ## Examples
 
 See [`examples/`](examples/): `counter.jl`, `clock.jl`, `multiwindow.jl`,
-`dialog.jl`, `widgets.jl` (a tour of the pre-styled widgets), `image.jl`
+`dialog.jl`, `widgets.jl` (a tour of the pre-styled widgets),
+`material3.jl` (the Material 3 component tour with a live light/dark switch),
+`enterprise.jl` (the Windows 7 / Winforms showcase), `image.jl`
 (the `Image` element with a generated gradient BMP) and `screenshot.jl`
 (bounded-frame rendering with a captured PNG).
 
@@ -400,7 +482,7 @@ julia --project -e 'using Pkg; Pkg.test()'
 * Keyed list reconciliation (full reordering support; `key` currently guards
   index slots only)
 * Text wrapping, text input fields
-* Scrollbars, keyboard paging, and fractional layout (flexbox-style
+* Keyboard scrollbar paging and fractional layout (flexbox-style
   growing/shrinking `flex` props)
 * Custom drawing (canvas escape hatch), images
 * Window-level `on_focus`/`on_resize` callbacks

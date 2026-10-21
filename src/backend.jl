@@ -395,6 +395,46 @@ end
 
 geometry_vertex(p, color) = SDL_Vertex(p, color, SDL_FPoint(0, 0))
 
+# ---- gradients -----------------------------------------------------------
+
+# Interpolate a two-stop gradient at `t` (0 = top/left, 1 = bottom/right).
+function gradient_color(g::LinearGradient, t)
+    t = clamp(Float64(t), 0.0, 1.0)
+    a = _to_rgba(g.top)
+    b = _to_rgba(g.bottom)
+    lerp(x, y) = round(UInt8, clamp(Float64(x) + (Float64(y) - Float64(x)) * t,
+                                   0.0, 255.0))
+    return (lerp(a[1], b[1]), lerp(a[2], b[2]),
+            lerp(a[3], b[3]), lerp(a[4], b[4]))
+end
+
+gradient_fraction(g::LinearGradient, x, y, rx, ry, rw, rh) =
+    g.direction === :horizontal ?
+    (rw <= 0 ? 0.0 : (x - rx) / rw) :
+    (rh <= 0 ? 0.0 : (y - ry) / rh)
+
+# A rectangle filled with a two-stop gradient. Axis-aligned rectangles do not
+# need the rounded-shape fringe, so a single quad is enough.
+function fill_gradient_rect(renderer, x, y, w, h, g::LinearGradient)
+    (w <= 0 || h <= 0) && return
+    c0 = geometry_color(gradient_color(g, 0.0))
+    c1 = geometry_color(gradient_color(g, 1.0))
+    tl, tr, bl, br = if g.direction === :horizontal
+        (c0, c1, c0, c1)
+    else
+        (c0, c0, c1, c1)
+    end
+    vertices = [
+        geometry_vertex(SDL_FPoint(x, y), tl),
+        geometry_vertex(SDL_FPoint(x + w, y), tr),
+        geometry_vertex(SDL_FPoint(x, y + h), bl),
+        geometry_vertex(SDL_FPoint(x + w, y + h), br),
+    ]
+    indices = Cint[0, 1, 2, 2, 1, 3]
+    SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
+    return nothing
+end
+
 # Append the triangles of a band between two equal-length rims. The first
 # rim (`a`) is at the inside of the band and carries the shape color; the
 # second (`b`) is at the outside and fades to transparent.
@@ -444,6 +484,43 @@ function fill_round_rect(renderer, x, y, w, h, r, color)
     for i in 1:m
         j = i % m + 1
         # solid interior fan, then the antialiasing fringe
+        push!(indices, Cint(0), Cint(i), Cint(j))
+    end
+    push_rim_band!(indices, m, 1, m + 1)
+    SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
+    return nothing
+end
+
+# Rounded-rectangle fill with a two-stop gradient. The mesh mirrors
+# `fill_round_rect`, but each vertex takes the gradient color at its position
+# and keeps the same 1px alpha fringe.
+function fill_round_rect_gradient(renderer, x, y, w, h, r, g::LinearGradient)
+    (w <= 0 || h <= 0) && return
+    radii = corner_radii(r, w, h)
+    maximum(radii) <= 0 &&
+        return fill_gradient_rect(renderer, x, y, w, h, g)
+    t = min(AA_HALF_WIDTH, w / 2, h / 2)
+    n = round_rect_segments(maximum(radii) + t)
+    inner = round_rect_points(
+        x + t, y + t, max(w - 2t, 0.0), max(h - 2t, 0.0),
+        ntuple(i -> max(radii[i] - t, 0.0), 4), n)
+    outer = round_rect_points(
+        x - t, y - t, w + 2t, h + 2t, ntuple(i -> radii[i] + t, 4), n)
+    m = length(inner)
+    color_at(px, py, coverage = 1.0) = geometry_color(
+        gradient_color(g, gradient_fraction(g, px, py, x, y, w, h)),
+        coverage)
+    vertices = Vector{SDL_Vertex}(undef, 2m + 1)
+    vertices[1] = geometry_vertex(
+        SDL_FPoint(x + w / 2, y + h / 2), color_at(x + w / 2, y + h / 2))
+    for i in 1:m
+        vertices[i + 1] = geometry_vertex(inner[i], color_at(inner[i].x, inner[i].y))
+        vertices[m + i + 1] = geometry_vertex(outer[i], color_at(outer[i].x, outer[i].y, 0.0))
+    end
+    indices = Cint[]
+    sizehint!(indices, 9m)
+    for i in 1:m
+        j = i % m + 1
         push!(indices, Cint(0), Cint(i), Cint(j))
     end
     push_rim_band!(indices, m, 1, m + 1)
@@ -501,6 +578,52 @@ function draw_rect_stroke(renderer, x, y, w, h, border_width)
     return nothing
 end
 
+function fill_shape(renderer, x, y, w, h, radius, color)
+    if color isa LinearGradient
+        has_radius(radius) ? fill_round_rect_gradient(renderer, x, y, w, h, radius, color) :
+        fill_gradient_rect(renderer, x, y, w, h, color)
+    elseif has_radius(radius)
+        fill_round_rect(renderer, x, y, w, h, radius, color)
+    else
+        set_color(renderer, color)
+        fill_rect(renderer, x, y, w, h)
+    end
+    return nothing
+end
+
+# Draw the highlight/shadow edges of raised, sunken or etched controls inside
+# the outer border. This is a 1px bevel, matching the compact Win7 metrics.
+function draw_bevel!(fiber, renderer)
+    props = fiber.props
+    bevel = Symbol(get(props, :bevel, :none))
+    bevel === :none && return nothing
+    x, y, w, h = fiber.rect
+    border = float(get(props, :border_width, 0))
+    inset = border
+    x += inset; y += inset; w -= 2inset; h -= 2inset
+    (w <= 0 || h <= 0) && return nothing
+    light = get(props, :bevel_light, (1.0, 1.0, 1.0, 0.75))
+    dark = get(props, :bevel_dark, (0.0, 0.0, 0.0, 0.35))
+    top_color, left_color, bottom_color, right_color =
+        bevel === :raised ? (light, light, dark, dark) :
+        bevel === :sunken ? (dark, dark, light, light) :
+        (dark, dark, light, light)
+    set_color(renderer, top_color)
+    fill_rect(renderer, x, y, w, 1)
+    set_color(renderer, left_color)
+    fill_rect(renderer, x, y, 1, h)
+    set_color(renderer, bottom_color)
+    fill_rect(renderer, x, y + h - 1, w, 1)
+    set_color(renderer, right_color)
+    fill_rect(renderer, x + w - 1, y, 1, h)
+    if bevel === :etched
+        set_color(renderer, light)
+        fill_rect(renderer, x + 1, y + 1, max(w - 2, 0.0), 1)
+        fill_rect(renderer, x + 1, y + 1, 1, max(h - 2, 0.0))
+    end
+    return nothing
+end
+
 function draw_background!(fiber, renderer)
     props = fiber.props
     background = background_for(fiber)
@@ -517,23 +640,24 @@ function draw_background!(fiber, renderer)
         # window background show through the seam.
         if background !== nothing && border_width > 0 && border_color !== nothing
             fill_round_rect(renderer, x, y, w, h, radius, border_color)
-            fill_round_rect(
+            fill_shape(
                 renderer, x + border_width, y + border_width,
                 max(w - 2border_width, 0.0), max(h - 2border_width, 0.0),
                 inset_radius(radius, border_width), background)
         elseif background !== nothing
-            fill_round_rect(renderer, x, y, w, h, radius, background)
+            fill_shape(renderer, x, y, w, h, radius, background)
         elseif border_width > 0 && border_color !== nothing
             ring_round_rect(renderer, x, y, w, h, radius, border_width, border_color)
         end
+        draw_bevel!(fiber, renderer)
         return nothing
     end
-    background !== nothing && (set_color(renderer, background); fill_rect(
-        renderer, fiber.rect[1], fiber.rect[2], fiber.rect[3], fiber.rect[4]))
+    background !== nothing && fill_shape(renderer, x, y, w, h, radius, background)
     if border_width > 0 && border_color !== nothing
         set_color(renderer, border_color)
         draw_rect_stroke(renderer, x, y, w, h, border_width)
     end
+    draw_bevel!(fiber, renderer)
     return nothing
 end
 
@@ -747,6 +871,31 @@ function draw_scrolled!(fiber, renderer)
         had_clip ? SDL_RenderSetClipRect(renderer, previous) :
                    SDL_RenderSetClipRect(renderer, C_NULL)
     end
+    draw_scrollbar!(fiber, renderer)
+    return nothing
+end
+
+# Optional scrollbar of a scroll container, drawn after (and outside) the
+# clipped content so the thumb stays crisp at the viewport edge.
+function draw_scrollbar!(fiber, renderer)
+    scrollbar_direction(fiber) === nothing && return nothing
+    state = fiber.host
+    state isa ScrollState || return nothing
+    tx, ty, tw, th = state.track_rect
+    (tw <= 0 || th <= 0) && return nothing
+    track = get(fiber.props, :scrollbar_track, (0.94, 0.94, 0.94))
+    set_color(renderer, track)
+    fill_rect(renderer, tx, ty, tw, th)
+    set_color(renderer, get(fiber.props, :scrollbar_border, (0.65, 0.65, 0.65)))
+    fill_rect(renderer, tx, ty, 1, th)
+    fill_rect(renderer, tx, ty, tw, 1)
+    hx, hy, hw, hh = state.thumb_rect
+    (hw <= 0 || hh <= 0) && return nothing
+    thumb = get(fiber.props, :scrollbar_thumb,
+                LinearGradient("#F7F7F7", "#CFCFCF"))
+    fill_shape(renderer, hx, hy, hw, hh, get(fiber.props, :scrollbar_radius, 2), thumb)
+    set_color(renderer, get(fiber.props, :scrollbar_border, (0.65, 0.65, 0.65)))
+    draw_rect_stroke(renderer, hx, hy, hw, hh, 1)
     return nothing
 end
 
@@ -836,9 +985,8 @@ function draw_slider!(fiber, renderer)
     handle_h = float(get(props, :handle_height, h))
     handle_color = get(props, :handle_color, active_color)
     ty = y + (h - track_h) / 2
-    draw_track = rounded ?
-        (cx, cw, c) -> fill_round_rect(renderer, cx, ty, cw, track_h, track_h / 2, c) :
-        (cx, cw, c) -> (set_color(renderer, c); fill_rect(renderer, cx, ty, cw, track_h))
+    draw_track = (cx, cw, c) ->
+        fill_shape(renderer, cx, ty, cw, track_h, rounded ? track_h / 2 : 0, c)
     if thumb_w > 0
         # Material 3 style: a gap in the track around the handle at the value.
         gap = min(thumb_w, w)
@@ -854,15 +1002,52 @@ function draw_slider!(fiber, renderer)
         end
     else
         draw_track(x, w, track_color)
-        draw_track(x, w * frac, active_color)
-        knob = 12.0
-        fill_round_rect(renderer, x + (w - knob) * frac, y + (h - knob) / 2, knob, knob,
-                        knob / 2, active_color)
+        active_color != track_color && draw_track(x, w * frac, active_color)
+        # Classical/Win7 thumb: a raised rectangular grip, optionally with a
+        # gradient and a border. Material 3 uses the `thumb_width > 0` branch
+        # above and keeps its existing look.
+        knob_w = float(get(props, :thumb_size, 12))
+        knob_h = float(get(props, :thumb_height, knob_w))
+        knob_r = float(get(props, :thumb_radius, knob_w / 2))
+        kx = x + (w - knob_w) * frac
+        ky = y + (h - knob_h) / 2
+        thumb = get(props, :thumb_gradient,
+                    get(props, :thumb_color, active_color))
+        fill_shape(renderer, kx, ky, knob_w, knob_h, knob_r, thumb)
+        tbw = float(get(props, :thumb_border_width, 0))
+        tbc = get(props, :thumb_border_color, nothing)
+        if tbw > 0 && tbc !== nothing
+            knob_r > 0 ?
+                ring_round_rect(renderer, kx, ky, knob_w, knob_h, knob_r, tbw, tbc) :
+                (set_color(renderer, tbc);
+                 draw_rect_stroke(renderer, kx, ky, knob_w, knob_h, tbw))
+        end
+        if get(props, :thumb_bevel, false) === true ||
+           Symbol(get(props, :thumb_bevel, :none)) !== :none
+            light = get(props, :bevel_light, (1.0, 1.0, 1.0, 0.8))
+            dark = get(props, :bevel_dark, (0.0, 0.0, 0.0, 0.35))
+            set_color(renderer, light)
+            fill_rect(renderer, kx + 1, ky + 1, max(knob_w - 2, 0.0), 1)
+            fill_rect(renderer, kx + 1, ky + 1, 1, max(knob_h - 2, 0.0))
+            set_color(renderer, dark)
+            fill_rect(renderer, kx + 1, ky + knob_h - 2, max(knob_w - 2, 0.0), 1)
+            fill_rect(renderer, kx + knob_w - 2, ky + 1, 1, max(knob_h - 2, 0.0))
+        end
     end
     if stop_color !== nothing
         dot = 2.0
         fill_round_rect(renderer, x - dot / 2, ty + track_h / 2 - dot / 2, dot, dot, dot / 2, stop_color)
         fill_round_rect(renderer, x + w - dot / 2, ty + track_h / 2 - dot / 2, dot, dot, dot / 2, stop_color)
+    end
+    ticks = Int(get(props, :ticks, 0))
+    if ticks > 0
+        tick_color = get(props, :tick_color, (0.45, 0.45, 0.45))
+        tick_len = float(get(props, :tick_length, 3))
+        set_color(renderer, tick_color)
+        for i in 0:ticks
+            tx = x + w * (i / ticks)
+            fill_rect(renderer, tx, y + h - tick_len, 1, tick_len)
+        end
     end
     return nothing
 end

@@ -19,6 +19,25 @@ mutable struct ScrollState
     max_offset::Float64
     content_extent::Float64
     viewport_extent::Float64
+    track_rect::Tuple{Float64,Float64,Float64,Float64}
+    thumb_rect::Tuple{Float64,Float64,Float64,Float64}
+    drag_start_offset::Float64
+    drag_start_pos::Float64
+end
+
+ScrollState(offset, max_offset, content_extent, viewport_extent) =
+    ScrollState(offset, max_offset, content_extent, viewport_extent,
+                (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0), 0.0, 0.0)
+
+# `scrollbar = true` / `:vertical` / `:horizontal` adds a compact visible
+# scrollbar. It is opt-in so plain scroll views keep their old pixel output.
+function scrollbar_direction(fiber)
+    s = get(fiber.props, :scrollbar, false)
+    (s === false || s === nothing) && return nothing
+    s === true && return :vertical
+    d = Symbol(s)
+    d in (:vertical, :horizontal) && return d
+    return nothing
 end
 
 # A ScrollView always scrolls (its `direction` selects the axis); a Box
@@ -115,6 +134,15 @@ function measure!(fiber)
             cross = max(cross, cw)
         end
         w, h = cross, main
+    end
+    # Box-like hosts with an explicit width/height must apply those bounds
+    # before measuring absolute `fill` children, so a full-size absolute child
+    # of a fixed-size container gets the container's final size.
+    if !is_window(fiber)
+        pw0 = get(fiber.props, :width, nothing)
+        ph0 = get(fiber.props, :height, nothing)
+        pw0 !== nothing && (w = float(pw0))
+        ph0 !== nothing && (h = float(ph0))
     end
     for child in fiber.children
         is_absolute_child(child) || continue
@@ -239,11 +267,19 @@ function place!(fiber, x, y)
         cy = y
         for child in flow_children(fiber)
             if get(child.props, :fill, false)
-                child.measured = (w, child.measured[2])
+                if Symbol(get(child.props, :position, :relative)) === _ABSOLUTE
+                    fw = get(child.props, :width, nothing)
+                    fh = get(child.props, :height, nothing)
+                    child.measured = (fw === nothing ? w : float(fw),
+                                      fh === nothing ? h : float(fh))
+                else
+                    child.measured = (w, child.measured[2])
+                end
             end
             place!(child, x, cy)
             cy += child.measured[2]
         end
+        place_absolute_children!(fiber, x, y, w, h)
     end
     return
 end
@@ -351,6 +387,23 @@ function place_scroll!(fiber, dir, gap, p, align, justify, x, y, w, h)
     state.viewport_extent = viewport
     state.max_offset = max(extent - viewport, 0.0)
     state.offset = clamp(state.offset, 0.0, state.max_offset)
+    state.track_rect = (0.0, 0.0, 0.0, 0.0)
+    state.thumb_rect = (0.0, 0.0, 0.0, 0.0)
+    sb = scrollbar_direction(fiber)
+    sbw = float(get(fiber.props, :scrollbar_width, 17))
+    if sb !== nothing && sb === :vertical && state.max_offset > 0
+        thumb_h = max(24.0, h * state.viewport_extent / max(state.content_extent, 1.0))
+        thumb_h = min(thumb_h, h)
+        thumb_y = y + (h - thumb_h) * (state.offset / state.max_offset)
+        state.track_rect = (x + w - sbw, y, sbw, h)
+        state.thumb_rect = (x + w - sbw + 1, thumb_y, sbw - 2, thumb_h)
+    elseif sb !== nothing && sb === :horizontal && state.max_offset > 0
+        thumb_w = max(24.0, w * state.viewport_extent / max(state.content_extent, 1.0))
+        thumb_w = min(thumb_w, w)
+        thumb_x = x + (w - thumb_w) * (state.offset / state.max_offset)
+        state.track_rect = (x, y + h - sbw, w, sbw)
+        state.thumb_rect = (thumb_x, y + h - sbw + 1, thumb_w, sbw - 2)
+    end
     offset_x = dir === :horizontal ? state.offset : 0.0
     offset_y = dir === :column ? state.offset : 0.0
     place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h;
@@ -369,11 +422,16 @@ function place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h;
                gap * max(length(kids) - 1, 0)
         cy = cy0 + (justify === :center ? (content_h - main) / 2 :
                     justify === :end ? content_h - main : 0.0)
+        stretch = Bool(get(fiber.props, :stretch_children, false))
         for child in kids
             # `fill` stretches across the parent's content box even when the
             # parent's size was fixed/filled after measurement (e.g. a
             # ScrollView content column matching the viewport width).
-            if get(child.props, :fill, false)
+            # `stretch_children` does the same for every child without an
+            # explicit width, which lets a page host stretch a component whose
+            # own output wants to fill (e.g. a tab page).
+            if get(child.props, :fill, false) ||
+               (stretch && get(child.props, :width, nothing) === nothing)
                 child.measured = (content_w, child.measured[2])
             end
             cw = child.measured[1]
@@ -404,12 +462,20 @@ function place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h;
     # at that corner of the parent with `x`/`y` as inward offsets (negative
     # values push it outward past the edge), `:center` centers it in the
     # parent and `:bottom` bottom-anchors it centered horizontally.
+    place_absolute_children!(fiber, x, y, w, h)
+    return nothing
+end
+
+function place_absolute_children!(fiber, x, y, w, h)
     for child in fiber.children
         is_absolute_child(child) || continue
+        if get(child.props, :fill, false)
+            fw = get(child.props, :width, nothing)
+            fh = get(child.props, :height, nothing)
+            child.measured = (fw === nothing ? w : float(fw),
+                              fh === nothing ? h : float(fh))
+        end
         cw, ch = child.measured
-        # `anchor` controls where the child is pinned; `align` is content
-        # alignment inside the child. Fall back to `align` for older children
-        # that predate the separate anchor prop.
         calign = Symbol(get(child.props, :anchor,
                             get(child.props, :align, :top_left)))
         dx = float(get(child.props, :x, 0))

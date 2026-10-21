@@ -13,7 +13,7 @@ using ..Rocks: @rock, @use, Observable, Element, props_dict, _PRESSABLE, _BOX,
 
 # Wrap raw string/value children in `Text` elements with the control's colors;
 # element children pass through, `nothing`/`Bool`s are skipped.
-function styled_children(kids, color, size)
+function styled_children(kids, color, size, font = nothing)
     out = Any[]
     for k in flat_children(kids)
         if k isa Element
@@ -21,7 +21,9 @@ function styled_children(kids, color, size)
         elseif k === nothing || k isa Bool
             continue
         else
-            push!(out, @rock Text(string(k); color = color, size = size))
+            text = @rock Text(string(k); color = color, size = size)
+            font !== nothing && (text.props[:font] = string(font))
+            push!(out, text)
         end
     end
     return out
@@ -45,11 +47,18 @@ function Button(; on_press = () -> nothing, disabled = false, label = "",
                 hover_background = nothing, pressed_background = nothing,
                 border_color = nothing, border_width = 0, radius = 0,
                 height = 40, width = nothing, padding = 16, gap = 8, size = 14,
-                text_color = (0.0, 0.0, 0.0))
+                text_color = (0.0, 0.0, 0.0), font = nothing,
+                bevel = :none, bevel_light = nothing, bevel_dark = nothing)
     label_kids = isempty(children) ?
                  Any[label == "" ? nothing :
-                     @rock Text(label; color = text_color, size = size)] :
-                 styled_children(children, text_color, size)
+                     (@rock Text(label; color = text_color, size = size))] :
+                 styled_children(children, text_color, size, font)
+    if font !== nothing
+        for k in label_kids
+            k isa Element && k.kind === _TEXT && !haskey(k.props, :font) &&
+                (k.props[:font] = string(font))
+        end
+    end
     props = props_dict(
         :on_press => disabled ? () -> nothing : on_press,
         :disabled => disabled,
@@ -67,7 +76,10 @@ function Button(; on_press = () -> nothing, disabled = false, label = "",
         :align => :center,
         :justify => :center,
         :gap => gap,
+        :bevel => bevel,
     )
+    bevel_light !== nothing && (props[:bevel_light] = bevel_light)
+    bevel_dark !== nothing && (props[:bevel_dark] = bevel_dark)
     width !== nothing && (props[:width] = width)
     return Element(_PRESSABLE, props, label_kids)
 end
@@ -89,7 +101,8 @@ function Checkbox(; checked, on_change = () -> nothing, disabled = false,
                   checked_background = nothing, unchecked_background = nothing,
                   checked_border = nothing, unchecked_border = nothing,
                   border_width = 2, check_color = nothing, check_size = 14,
-                  label_color = nothing)
+                  label_color = nothing, font = nothing, marker_bevel = :none,
+                  bevel_light = nothing, bevel_dark = nothing)
     checked isa Observable ||
         error("Mechanics.Checkbox needs an `Observable` as its `checked` prop")
     on = checked[]
@@ -97,6 +110,9 @@ function Checkbox(; checked, on_change = () -> nothing, disabled = false,
                 (label == "" ? nothing :
                  @rock Text(label; color = label_color)) :
                 @rock Row(flat_children(children)...; gap = 8, align = :center)
+    if font !== nothing && label_kid isa Element && label_kid.kind === _TEXT
+        label_kid.props[:font] = string(font)
+    end
     check = on && check_color !== nothing ? check_color : (0, 0, 0, 0)
     return Element(
         _PRESSABLE,
@@ -118,6 +134,11 @@ function Checkbox(; checked, on_change = () -> nothing, disabled = false,
                 background = on ? checked_background : unchecked_background,
                 border_color = on ? checked_border : unchecked_border,
                 border_width = border_width,
+                bevel = marker_bevel,
+                bevel_light = bevel_light === nothing ?
+                              (1.0, 1.0, 1.0, 0.75) : bevel_light,
+                bevel_dark = bevel_dark === nothing ?
+                             (0.0, 0.0, 0.0, 0.35) : bevel_dark,
                 direction = :row, align = :center, justify = :center),
             label_kid
         ],
@@ -200,7 +221,8 @@ The mechanics of a radio indicator: a pressable circle that sets
 function Radio(; selected, value, on_change = () -> nothing, disabled = false,
                label = "", children = Any[], size = 20, border_width = 2,
                selected_ring = nothing, unselected_ring = nothing,
-               dot_color = nothing, label_color = nothing)
+               dot_color = nothing, label_color = nothing, font = nothing,
+               marker_bevel = :none, bevel_light = nothing, bevel_dark = nothing)
     selected isa Observable ||
         error("Mechanics.Radio needs an `Observable` as its `selected` prop")
     is_selected = selected[] == value
@@ -208,6 +230,9 @@ function Radio(; selected, value, on_change = () -> nothing, disabled = false,
                 (label == "" ? nothing :
                  @rock Text(label; color = label_color)) :
                 @rock Row(flat_children(children)...; gap = 8, align = :center)
+    if font !== nothing && label_kid isa Element && label_kid.kind === _TEXT
+        label_kid.props[:font] = string(font)
+    end
     return Element(
         _PRESSABLE,
         props_dict(
@@ -230,6 +255,11 @@ function Radio(; selected, value, on_change = () -> nothing, disabled = false,
                 radius = size / 2,
                 border_color = is_selected ? selected_ring : unselected_ring,
                 border_width = border_width,
+                bevel = marker_bevel,
+                bevel_light = bevel_light === nothing ?
+                              (1.0, 1.0, 1.0, 0.75) : bevel_light,
+                bevel_dark = bevel_dark === nothing ?
+                             (0.0, 0.0, 0.0, 0.35) : bevel_dark,
                 direction = :row, align = :center, justify = :center),
             label_kid
         ],
@@ -403,7 +433,8 @@ function TextField(; text, on_submit = () -> nothing, disabled = false,
                    focused_border_color = nothing, border_width = 1,
                    text_color = nothing, placeholder_color = nothing,
                    caret_color = nothing, caret_width = 2, label_color = nothing,
-                   size = 16)
+                   size = 16, font = nothing, bevel = :none,
+                   bevel_light = nothing, bevel_dark = nothing)
     text isa Observable ||
         error("Mechanics.TextField needs an `Observable` as its `text` prop")
     focused = has_focus()
@@ -411,6 +442,9 @@ function TextField(; text, on_submit = () -> nothing, disabled = false,
     content = value == "" && !focused && placeholder != "" ?
               (@rock Text(placeholder; color = placeholder_color, size = size)) :
               (@rock Text(value; color = text_color, size = size))
+    if font !== nothing
+        content.props[:font] = string(font)
+    end
     caret = focused ? (@rock Box(;
         width = caret_width, height = height - 2padding,
         background = caret_color)) : nothing
@@ -448,6 +482,11 @@ function TextField(; text, on_submit = () -> nothing, disabled = false,
             :padding_y => 0,
             :direction => :row,
             :align => :center,
+            :bevel => bevel,
+            :bevel_light => bevel_light === nothing ?
+                            (1.0, 1.0, 1.0, 0.75) : bevel_light,
+            :bevel_dark => bevel_dark === nothing ?
+                           (0.0, 0.0, 0.0, 0.35) : bevel_dark,
         ),
         Any[field_kid],
     )

@@ -14,6 +14,26 @@ functions re-invoked on every render.
 """
 abstract type HostKind end
 
+"""
+    LinearGradient(top, bottom; direction = :vertical)
+
+A two-stop linear gradient fill accepted anywhere a `background`,
+`hover_background`, `pressed_background` or slider track color is accepted.
+`direction` is `:vertical` (top to bottom, the default) or `:horizontal`
+(left to right). The colors use the same forms as solid colors.
+"""
+struct LinearGradient
+    top::Any
+    bottom::Any
+    direction::Symbol
+    function LinearGradient(top, bottom; direction = :vertical)
+        d = Symbol(direction)
+        d in (:vertical, :horizontal) ||
+            error("LinearGradient direction must be :vertical or :horizontal, got: $direction")
+        return new(top, bottom, d)
+    end
+end
+
 struct _WindowKind <: HostKind end
 struct _BoxKind <: HostKind end
 struct _ScrollViewKind <: HostKind end

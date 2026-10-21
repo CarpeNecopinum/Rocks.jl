@@ -37,13 +37,22 @@ end
 nested windows are hit-tested through their own OS window)."
 function hit_test(fiber, x, y)
     rx, ry, rw, rh = fiber.rect
-    (x < rx || y < ry || x >= rx + rw || y >= ry + rh) && return nothing
+    inside_parent = !(x < rx || y < ry || x >= rx + rw || y >= ry + rh)
+    if !inside_parent && Symbol(get(fiber.props, :overflow, :hidden)) !== :visible
+        return nothing
+    end
     for child in reverse(fiber.children)
         is_window(child) && continue
         found = hit_test(child, x, y)
         found !== nothing && return found
     end
-    return fiber
+    inside_parent || return nothing
+    # A transparent overlay can let pointer events fall through to the content
+    # below while still keeping its interactive children hittable.
+    Symbol(get(fiber.props, :pointer_events, :auto)) === :none && return nothing
+    # Component fibers are not interactive themselves; their host output (or a
+    # descendant) is the event target.
+    return is_host(fiber.kind) ? fiber : nothing
 end
 
 "Mark the OS window with the given SDL windowID as needing a redraw. This
@@ -123,6 +132,24 @@ function find_draggable(target, x, y)
            inside(f.host.handle_rect, x, y)
             return f
         end
+        if is_scrollable(f) && f.host isa ScrollState &&
+           inside(f.host.thumb_rect, x, y)
+            return f
+        end
+        is_window(f) && return nothing
+        f = f.parent
+    end
+    return nothing
+end
+
+# A click on the scrollbar track (outside the thumb) pages the viewport.
+function find_scrollbar_track(target, x, y)
+    f = target
+    while f !== nothing
+        if is_scrollable(f) && f.host isa ScrollState
+            st = f.host
+            inside(st.track_rect, x, y) && !inside(st.thumb_rect, x, y) && return f
+        end
         is_window(f) && return nothing
         f = f.parent
     end
@@ -137,6 +164,10 @@ function drag_start!(fiber, x, y)
         fiber.host.drag_start_pos = dir === :vertical ? y : x
     elseif fiber.kind === _SLIDER
         slider_drag_update!(fiber, x, y) # clicking jumps to the position
+    elseif is_scrollable(fiber) && fiber.host isa ScrollState
+        fiber.host.drag_start_offset = fiber.host.offset
+        dir = scrollbar_direction(fiber)
+        fiber.host.drag_start_pos = dir === :horizontal ? x : y
     end
     return nothing
 end
@@ -156,6 +187,25 @@ function drag_update!(fiber, x, y)
         mark_window_layout!(fiber)
     elseif fiber.kind === _SLIDER
         slider_drag_update!(fiber, x, y)
+    elseif is_scrollable(fiber) && fiber.host isa ScrollState
+        st = fiber.host
+        dir = scrollbar_direction(fiber)
+        tx, ty, tw, th = st.track_rect
+        hx, hy, hw, hh = st.thumb_rect
+        if dir === :horizontal
+            travel = tw - hw
+            pos = x
+            start = st.drag_start_pos
+        else
+            travel = th - hh
+            pos = y
+            start = st.drag_start_pos
+        end
+        travel <= 0 && return nothing
+        st.offset = clamp(st.drag_start_offset + (pos - start) / travel * st.max_offset,
+                          0.0, st.max_offset)
+        callback(fiber.props, :on_scroll, st.offset)
+        mark_window_layout!(fiber)
     end
     return nothing
 end
@@ -346,6 +396,23 @@ function dispatch_event!(event::SDL_Event)
         if focusable !== FOCUSED[]
             FOCUSED[] = focusable
             request_render()
+        end
+
+        # Clicking the scrollbar track pages the viewport.
+        pager = find_scrollbar_track(target, mx, my)
+        if pager !== nothing
+            st = pager.host
+            dir = scrollbar_direction(pager)
+            _, _, _, th = st.track_rect
+            _, _, _, hh = st.thumb_rect
+            page = max(st.viewport_extent * 0.9, 24.0)
+            delta = dir === :horizontal ?
+                    (mx < st.thumb_rect[1] ? -page : page) :
+                    (my < st.thumb_rect[2] ? -page : page)
+            st.offset = clamp(st.offset + delta, 0.0, st.max_offset)
+            callback(pager.props, :on_scroll, st.offset)
+            mark_window_layout!(pager)
+            return
         end
 
         # start a drag when the press lands on a Split handle or a Slider

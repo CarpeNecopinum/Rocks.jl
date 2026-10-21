@@ -54,10 +54,11 @@ include("components.jl")
 include("widgets.jl")
 include("mechanics.jl")
 include(joinpath("Material3", "Material3.jl"))
+include(joinpath("Enterprise", "Enterprise.jl"))
 
 export @rock, @use, render, quit!, screenshot,
        Window, Box, Text, Pressable, Row, Column, ScrollView,
-       Image, Split, Slider,
+       Image, Split, Slider, LinearGradient,
        Button, Checkbox, Toggle, RadioGroup, DropDownMenu, Tabber, ProgressBar,
        createContext, Context,
        useEffect, useMemo, useCallback,
