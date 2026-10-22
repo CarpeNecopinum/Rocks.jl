@@ -1,4 +1,4 @@
-# SDL2 backend: colors, fonts, windows, textures and drawing.
+# SDL3 backend: colors, fonts, windows, textures and drawing.
 #
 # All SDL calls live in this file (plus events.jl/runtime.jl), keeping the
 # reconciler and layout logic headless-testable.
@@ -51,7 +51,7 @@ end
 # ---- fonts ---------------------------------------------------------------
 
 const DEFAULT_FONT = Ref{Union{Nothing,String}}(nothing)
-const FONT_CACHE = Dict{Tuple{String,Int},Ptr{TTF_Font}}()
+const FONT_CACHE = Dict{Tuple{String,Int},SDL3.TTF_Font}()
 
 const FONT_SEARCH_PATHS = [
     # honored first
@@ -98,17 +98,18 @@ function default_font()
 end
 
 """
-    load_font(path, size) -> Ptr{TTF_Font}
+    load_font(path, size) -> SDL3.TTF_Font
 
 Open a TTF font (cached by path and size). Returns the SDL font pointer used
 by the backend.
 """
 function load_font(path::AbstractString, size::Int)
     return get!(FONT_CACHE, (String(path), size)) do
-        font = TTF_OpenFont(String(path), size)
-        font == C_NULL && error(
-            "could not load font \"$path\": $(unsafe_string(SDL_GetError()))",
-        )
+        font = try
+            SDL3.TTF_OpenFont(String(path), Float64(size))
+        catch err
+            error("could not load font \"$path\": $(sprint(showerror, err))")
+        end
         font
     end
 end
@@ -116,8 +117,8 @@ end
 # ---- backend state -------------------------------------------------------
 
 mutable struct WindowState
-    ptr::Ptr{SDL_Window}
-    renderer::Ptr{SDL_Renderer}
+    ptr::SDL3.Window
+    renderer::SDL3.Renderer
     id::UInt32
     width::Int
     height::Int
@@ -127,6 +128,9 @@ mutable struct WindowState
     # re-running components (used after resizes).
     needs_draw::Bool
     needs_layout::Bool
+    # The clip rectangle currently set on the renderer (SDL3 has no
+    # "is the clip enabled" query, so the backend keeps track of it).
+    clip::Union{Nothing,SDL3.Rect}
 end
 
 mutable struct TextState
@@ -134,8 +138,8 @@ mutable struct TextState
     color::Tuple{UInt8,UInt8,UInt8,UInt8}
     size::Float64
     fontpath::String
-    renderer::Ptr{SDL_Renderer}
-    textures::Vector{Ptr{SDL_Texture}}
+    renderer::SDL3.Renderer
+    textures::Vector{SDL3.Texture}
     linewidths::Vector{Float64}
     lineheights::Vector{Float64}
     advance::Float64 # baseline-to-baseline distance for multi-line text
@@ -147,11 +151,11 @@ mutable struct PressState
 end
 
 mutable struct ImageState
-    texture::Ptr{SDL_Texture}
+    texture::SDL3.Texture
     w::Float64 # natural size of the loaded image
     h::Float64
     src::String
-    renderer::Ptr{SDL_Renderer}
+    renderer::SDL3.Renderer
 end
 
 mutable struct SplitState
@@ -172,10 +176,16 @@ const BACKEND_INITIALIZED = Ref(false)
 
 function init_backend()
     BACKEND_INITIALIZED[] && return
-    rc = SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)
-    rc == 0 || error("SDL_Init failed: $(unsafe_string(SDL_GetError()))")
-    TTF_Init() == 0 || error("TTF_Init failed: $(unsafe_string(SDL_GetError()))")
-    IMG_Init(Cint(IMG_INIT_PNG) | Cint(IMG_INIT_JPG)) # best effort; PNG/JPG cover common formats
+    try
+        SDL3.Init(SDL3.SDL_INIT_VIDEO | SDL3.SDL_INIT_EVENTS)
+    catch err
+        error("SDL3 could not be initialised: $(sprint(showerror, err))")
+    end
+    try
+        SDL3.TTF_Init()
+    catch err
+        error("SDL3_ttf could not be initialised: $(sprint(showerror, err))")
+    end
     BACKEND_INITIALIZED[] = true
     return nothing
 end
@@ -190,11 +200,17 @@ function shutdown_backend()
     empty!(HOVERED)
     # Cached font pointers are invalidated by TTF_Quit — close and forget them.
     for font in values(FONT_CACHE)
-        font != C_NULL && TTF_CloseFont(font)
+        font != C_NULL && SDL3.TTF_CloseFont(font)
     end
     empty!(FONT_CACHE)
-    TTF_Quit()
-    SDL_Quit()
+    # The same holds for cached image surfaces: they belong to the SDL
+    # instance that is about to go away.
+    for surface in values(IMAGE_SURFACES)
+        surface != C_NULL && SDL3.DestroySurface(surface)
+    end
+    empty!(IMAGE_SURFACES)
+    SDL3.TTF_Quit()
+    SDL3.Quit()
     BACKEND_INITIALIZED[] = false
     return nothing
 end
@@ -228,13 +244,12 @@ function window_position(fiber)
     if position === :manual
         return (Int(get(props, :x, 0)), Int(get(props, :y, 0)))
     elseif position === :mouse
-        mx, my = Ref{Cint}(0), Ref{Cint}(0)
-        SDL_GetMouseState(mx, my)
-        return (Int(mx[]), Int(my[]))
+        _, mx, my = SDL3.GetGlobalMouseState()
+        return (round(Int, mx), round(Int, my))
     end
 
     bx, by, bw, bh = display_bounds(get(props, :display, nothing))
-    (bw <= 0 || bh <= 0) && return (SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED)
+    (bw <= 0 || bh <= 0) && return (0, 0)
     cascade = position === :cascade ? 32 * (length(WINDOW_BY_ID) % 8) : 0
     x = bx + max(0, bw - width) ÷ 2 + cascade
     y = by + max(0, bh - height) ÷ 2 + cascade
@@ -244,60 +259,119 @@ end
 # Bounds (x, y, w, h) of a display: `nothing` selects the display the mouse
 # pointer is on (falling back to display 0). Returns (0, 0, 0, 0) when the
 # display cannot be queried (e.g. headless drivers).
+#
+# `display` is a display *index* (0 = the first display); SDL3 identifies
+# displays by an id, so the index is translated here.
 function display_bounds(display)
     if display === nothing
-        mx, my = Ref{Cint}(0), Ref{Cint}(0)
-        SDL_GetMouseState(mx, my)
-        index = SDL_GetPointDisplayIndex(Ref(SDL_Point(mx[], my[])))
-        index = index < 0 ? 0 : index
+        _, mx, my = SDL3.GetGlobalMouseState()
+        id = SDL3.GetDisplayForPoint(SDL3.Point(round(Int, mx), round(Int, my)))
     else
+        displays = SDL3.GetDisplays()
         index = Int(display)
+        (index < 0 || index >= length(displays)) && return (0, 0, 0, 0)
+        id = displays[index + 1]
     end
-    bounds = Ref(SDL_Rect(0, 0, 0, 0))
-    if SDL_GetDisplayBounds(index, bounds) == 0
-        return (bounds[].x, bounds[].y, bounds[].w, bounds[].h)
+    bounds = try
+        SDL3.GetDisplayBounds(id)
+    catch
+        return (0, 0, 0, 0)
     end
-    mode = Ref(SDL_DisplayMode(0, 0, 0, 0, C_NULL))
-    if SDL_GetDesktopDisplayMode(index, mode) == 0
-        return (0, 0, mode[].w, mode[].h)
+    (bounds.w > 0 && bounds.h > 0) && return (bounds.x, bounds.y, bounds.w, bounds.h)
+    try
+        mode = SDL3.GetDesktopDisplayMode(id)
+        return (0, 0, mode.w, mode.h)
+    catch
+        return (0, 0, 0, 0)
     end
-    return (0, 0, 0, 0)
 end
 
 window_size(fiber) =
     (Int(get(fiber.props, :width, 800)), Int(get(fiber.props, :height, 600)))
+
+# The screen origin of a window's client area: the window position plus its
+# decorations (title bar and frame), which are not part of the client area.
+# Headless drivers do not report decorations, so they contribute nothing.
+function client_origin(fiber)
+    fiber.host isa WindowState || return (0, 0)
+    x, y = SDL3.GetWindowPosition(fiber.host.ptr)
+    top, left = try
+        t, l, _, _ = SDL3.GetWindowBordersSize(fiber.host.ptr)
+        (Int(t), Int(l))
+    catch
+        (0, 0)
+    end
+    return (Int(x) + left, Int(y) + top)
+end
+
+# The window a popup belongs to: its nearest ancestor window.
+function owner_window(fiber)
+    f = fiber.parent
+    while f !== nothing
+        is_window(f) && return f
+        f = f.parent
+    end
+    return nothing
+end
 
 function create_window!(fiber)
     title = string(get(fiber.props, :title, "Rocks"))
     width, height = window_size(fiber)
     resizable = Bool(get(fiber.props, :resizable, false))
     popup = Bool(get(fiber.props, :popup, false))
-    flags = UInt32(SDL_WINDOW_SHOWN)
-    resizable && (flags |= UInt32(SDL_WINDOW_RESIZABLE))
+    flags = UInt64(0)
+    resizable && (flags |= SDL3.SDL_WINDOW_RESIZABLE)
     if popup
         # Popup menus: borderless, transient, always above the parent —
         # the window content draws its own bevel border.
-        flags |= UInt32(SDL_WINDOW_BORDERLESS | SDL_WINDOW_POPUP_MENU |
-                        SDL_WINDOW_ALWAYS_ON_TOP | SDL_WINDOW_SKIP_TASKBAR)
+        flags |= SDL3.SDL_WINDOW_BORDERLESS | SDL3.SDL_WINDOW_POPUP_MENU |
+                 SDL3.SDL_WINDOW_ALWAYS_ON_TOP
     end
     xpos, ypos = window_position(fiber)
-    ptr = SDL_CreateWindow(title, xpos, ypos, width, height, flags)
-    ptr == C_NULL && error("SDL_CreateWindow failed: $(unsafe_string(SDL_GetError()))")
-    renderer = SDL_CreateRenderer(
-        ptr,
-        Cint(-1),
-        UInt32(SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC),
-    )
-    if renderer == C_NULL # fall back to a software renderer
-        renderer = SDL_CreateRenderer(ptr, Cint(-1), UInt32(SDL_RENDERER_SOFTWARE))
+    ptr = if popup
+        # A popup is positioned relative to its owner window, so it lines up
+        # with the control that opened it on every platform (window positions
+        # and their decorations differ between them).
+        owner = owner_window(fiber)
+        if owner === nothing
+            error("a popup window needs an owner window")
+        end
+        try
+            SDL3.CreatePopupWindow(owner.host.ptr, xpos, ypos, width, height, flags)
+        catch
+            # Headless video drivers have no transient popup windows; a plain
+            # borderless window at the same place works there.
+            ox, oy = client_origin(owner)
+            plain = try
+                SDL3.CreateWindow(title, width, height,
+                                  flags & ~UInt64(SDL3.SDL_WINDOW_POPUP_MENU))
+            catch err
+                error("SDL3 could not create the window: $(sprint(showerror, err))")
+            end
+            SDL3.SetWindowPosition(plain, ox + xpos, oy + ypos)
+            plain
+        end
+    else
+        w = try
+            SDL3.CreateWindow(title, width, height, flags)
+        catch err
+            error("SDL3 could not create the window: $(sprint(showerror, err))")
+        end
+        SDL3.SetWindowPosition(w, xpos, ypos)
+        w
     end
-    renderer == C_NULL && error("SDL_CreateRenderer failed: $(unsafe_string(SDL_GetError()))")
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND)
-    state = WindowState(ptr, renderer, SDL_GetWindowID(ptr), width, height, true, false)
+    renderer = try
+        SDL3.CreateRenderer(ptr, "")
+    catch err
+        error("SDL3 could not create a renderer: $(sprint(showerror, err))")
+    end
+    SDL3.SetRenderDrawBlendMode(renderer, SDL3.SDL_BLENDMODE_BLEND)
+    state = WindowState(ptr, renderer, SDL3.GetWindowID(ptr), width, height,
+                        true, false, nothing)
     fiber.host = state
     WINDOW_BY_ID[state.id] = fiber
     # Menu popups must paint above their owner window.
-    popup && SDL_RaiseWindow(ptr)
+    popup && SDL3.RaiseWindow(ptr)
     return state
 end
 
@@ -305,8 +379,8 @@ function destroy_window!(fiber)
     fiber.host isa WindowState || return
     state = fiber.host
     delete!(WINDOW_BY_ID, state.id)
-    SDL_DestroyRenderer(state.renderer)
-    SDL_DestroyWindow(state.ptr)
+    SDL3.DestroyRenderer(state.renderer)
+    SDL3.DestroyWindow(state.ptr)
     fiber.host = nothing
     return nothing
 end
@@ -315,13 +389,17 @@ end
 function sync_window!(fiber)
     fiber.host isa WindowState || return
     state = fiber.host
+    # Popup windows have no title bar and SDL3 rejects both a title change
+    # and a resize on them.
+    if Bool(get(fiber.props, :popup, false))
+        return nothing
+    end
     title = string(get(fiber.props, :title, "Rocks"))
     resizable = Bool(get(fiber.props, :resizable, false))
-    current = unsafe_string(SDL_GetWindowTitle(state.ptr))
-    current != title && SDL_SetWindowTitle(state.ptr, title)
-    want = resizable ? SDL_TRUE : SDL_FALSE
-    (SDL_GetWindowFlags(state.ptr) & UInt32(SDL_WINDOW_RESIZABLE) != 0) != (want != 0) &&
-        SDL_SetWindowResizable(state.ptr, want)
+    current = SDL3.GetWindowTitle(state.ptr)
+    current != title && SDL3.SetWindowTitle(state.ptr, title)
+    want = SDL3.HasWindowFlag(state.ptr, SDL3.SDL_WINDOW_RESIZABLE)
+    want != resizable && SDL3.SetWindowResizable(state.ptr, resizable)
     return nothing
 end
 
@@ -329,14 +407,15 @@ end
 
 function set_color(renderer, color)
     r, g, b, a = _to_rgba(color)
-    SDL_SetRenderDrawColor(renderer, r, g, b, a)
+    SDL3.SetRenderDrawColor(renderer, r, g, b, a)
     return nothing
 end
 
 function fill_rect(renderer, x, y, w, h)
     (w <= 0 || h <= 0) && return
-    rect = SDL_Rect(round(Int, x), round(Int, y), round(Int, w), round(Int, h))
-    SDL_RenderFillRect(renderer, Ref(rect))
+    SDL3.RenderFillRect(renderer,
+                        SDL3.FRect(round(Int, x), round(Int, y),
+                                   round(Int, w), round(Int, h)))
     return nothing
 end
 
@@ -379,7 +458,7 @@ function round_rect_points(x, y, w, h, r, n)
 end
 
 function round_rect_points(x, y, w, h, r::NTuple{4,<:Real}, n)
-    pts = Vector{SDL_FPoint}()
+    pts = Vector{SDL3.SDL_FPoint}()
     sizehint!(pts, 4 * (n + 1))
     for (cx, cy, a0, cr) in (
         (x + w - r[2], y + r[2], -pi / 2, r[2]),   # top-right: up → right
@@ -389,20 +468,21 @@ function round_rect_points(x, y, w, h, r::NTuple{4,<:Real}, n)
     )
         for i in 0:n
             a = a0 + (i / n) * (pi / 2)
-            push!(pts, SDL_FPoint(cx + cr * cos(a), cy + cr * sin(a)))
+            push!(pts, SDL3.SDL_FPoint(cx + cr * cos(a), cy + cr * sin(a)))
         end
     end
     return pts
 end
 
-# One SDL_Color per vertex of a geometry batch, scaled by `coverage` (0..1).
-geometry_color(color, coverage = 1.0) = begin
+# One vertex colour per vertex of a geometry batch, scaled by `coverage`
+# (0..1). SDL3 geometry uses floating point colours.
+function geometry_color(color, coverage = 1.0)
     r, g, b, a = _to_rgba(color)
-    alpha = round(UInt8, clamp(coverage, 0.0, 1.0) * a)
-    SDL_Color(r, g, b, alpha)
+    alpha = clamp(coverage, 0.0, 1.0) * (a / 255)
+    SDL3.SDL_FColor(r / 255, g / 255, b / 255, alpha)
 end
 
-geometry_vertex(p, color) = SDL_Vertex(p, color, SDL_FPoint(0, 0))
+geometry_vertex(p, color) = SDL3.SDL_Vertex(p, color, SDL3.SDL_FPoint(0, 0))
 
 # ---- gradients -----------------------------------------------------------
 
@@ -434,13 +514,13 @@ function fill_gradient_rect(renderer, x, y, w, h, g::LinearGradient)
         (c0, c0, c1, c1)
     end
     vertices = [
-        geometry_vertex(SDL_FPoint(x, y), tl),
-        geometry_vertex(SDL_FPoint(x + w, y), tr),
-        geometry_vertex(SDL_FPoint(x, y + h), bl),
-        geometry_vertex(SDL_FPoint(x + w, y + h), br),
+        geometry_vertex(SDL3.SDL_FPoint(x, y), tl),
+        geometry_vertex(SDL3.SDL_FPoint(x + w, y), tr),
+        geometry_vertex(SDL3.SDL_FPoint(x, y + h), bl),
+        geometry_vertex(SDL3.SDL_FPoint(x + w, y + h), br),
     ]
     indices = Cint[0, 1, 2, 2, 1, 3]
-    SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
+    SDL3.RenderGeometry(renderer, vertices, indices)
     return nothing
 end
 
@@ -464,17 +544,17 @@ function fill_triangle!(renderer, x, y, w, h, color; pointing = :up)
     (w <= 0 || h <= 0) && return
     c = geometry_color(color)
     points = if Symbol(pointing) === :up
-        (SDL_FPoint(x + w / 2, y), SDL_FPoint(x + w, y + h), SDL_FPoint(x, y + h))
+        (SDL3.SDL_FPoint(x + w / 2, y), SDL3.SDL_FPoint(x + w, y + h), SDL3.SDL_FPoint(x, y + h))
     elseif Symbol(pointing) === :down
-        (SDL_FPoint(x, y), SDL_FPoint(x + w, y), SDL_FPoint(x + w / 2, y + h))
+        (SDL3.SDL_FPoint(x, y), SDL3.SDL_FPoint(x + w, y), SDL3.SDL_FPoint(x + w / 2, y + h))
     elseif Symbol(pointing) === :left
-        (SDL_FPoint(x, y + h / 2), SDL_FPoint(x + w, y), SDL_FPoint(x + w, y + h))
+        (SDL3.SDL_FPoint(x, y + h / 2), SDL3.SDL_FPoint(x + w, y), SDL3.SDL_FPoint(x + w, y + h))
     else
-        (SDL_FPoint(x + w, y + h / 2), SDL_FPoint(x, y + h), SDL_FPoint(x, y))
+        (SDL3.SDL_FPoint(x + w, y + h / 2), SDL3.SDL_FPoint(x, y + h), SDL3.SDL_FPoint(x, y))
     end
     vertices = [geometry_vertex(p, c) for p in points]
     indices = Cint[0, 1, 2]
-    SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
+    SDL3.RenderGeometry(renderer, vertices, indices)
     return nothing
 end
 
@@ -501,9 +581,9 @@ function fill_round_rect(renderer, x, y, w, h, r, color)
     m = length(inner)
     c = geometry_color(color)
     c0 = geometry_color(color, 0.0)
-    vertices = Vector{SDL_Vertex}(undef, 2m + 1)
+    vertices = Vector{SDL3.SDL_Vertex}(undef, 2m + 1)
     vertices[1] = geometry_vertex(
-        SDL_FPoint(x + w / 2, y + h / 2), c)
+        SDL3.SDL_FPoint(x + w / 2, y + h / 2), c)
     for i in 1:m
         vertices[i + 1] = geometry_vertex(inner[i], c)
         vertices[m + i + 1] = geometry_vertex(outer[i], c0)
@@ -516,7 +596,7 @@ function fill_round_rect(renderer, x, y, w, h, r, color)
         push!(indices, Cint(0), Cint(i), Cint(j))
     end
     push_rim_band!(indices, m, 1, m + 1)
-    SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
+    SDL3.RenderGeometry(renderer, vertices, indices)
     return nothing
 end
 
@@ -539,9 +619,9 @@ function fill_round_rect_gradient(renderer, x, y, w, h, r, g::LinearGradient)
     color_at(px, py, coverage = 1.0) = geometry_color(
         gradient_color(g, gradient_fraction(g, px, py, x, y, w, h)),
         coverage)
-    vertices = Vector{SDL_Vertex}(undef, 2m + 1)
+    vertices = Vector{SDL3.SDL_Vertex}(undef, 2m + 1)
     vertices[1] = geometry_vertex(
-        SDL_FPoint(x + w / 2, y + h / 2), color_at(x + w / 2, y + h / 2))
+        SDL3.SDL_FPoint(x + w / 2, y + h / 2), color_at(x + w / 2, y + h / 2))
     for i in 1:m
         vertices[i + 1] = geometry_vertex(inner[i], color_at(inner[i].x, inner[i].y))
         vertices[m + i + 1] = geometry_vertex(outer[i], color_at(outer[i].x, outer[i].y, 0.0))
@@ -553,7 +633,7 @@ function fill_round_rect_gradient(renderer, x, y, w, h, r, g::LinearGradient)
         push!(indices, Cint(0), Cint(i), Cint(j))
     end
     push_rim_band!(indices, m, 1, m + 1)
-    SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
+    SDL3.RenderGeometry(renderer, vertices, indices)
     return nothing
 end
 
@@ -582,7 +662,7 @@ function ring_round_rect(renderer, x, y, w, h, r, bw, color)
     m = length(outer_in)
     c = geometry_color(color)
     c0 = geometry_color(color, 0.0)
-    vertices = Vector{SDL_Vertex}(undef, 4m)
+    vertices = Vector{SDL3.SDL_Vertex}(undef, 4m)
     for i in 1:m
         vertices[i] = geometry_vertex(outer_in[i], c)
         vertices[m + i] = geometry_vertex(outer_out[i], c0)
@@ -594,7 +674,7 @@ function ring_round_rect(renderer, x, y, w, h, r, bw, color)
     push_rim_band!(indices, m, 0, m)      # outer edge fringe
     push_rim_band!(indices, m, 0, 2m)     # solid border
     push_rim_band!(indices, m, 2m, 3m)    # inner (hole) edge fringe
-    SDL_RenderGeometry(renderer, C_NULL, vertices, length(vertices), indices, length(indices))
+    SDL3.RenderGeometry(renderer, vertices, indices)
     return nothing
 end
 
@@ -742,36 +822,48 @@ function ensure_text!(fiber, renderer)
     state === nothing || free_text!(state)
     font = load_font(fontpath, max(round(Int, size), 1))
     lines = split(content, '\n'; keepempty = true)
-    textures = Ptr{SDL_Texture}[]
+    textures = SDL3.Texture[]
     linewidths = Float64[]
     lineheights = Float64[]
-    scolor = SDL_Color(color...)
+    scolor = SDL3.SDL_Color(color...)
     for line in lines
-        surface = TTF_RenderUTF8_Blended(font, String(line), scolor)
-        if surface == C_NULL
+        # SDL3_ttf refuses to render an empty string ("Text has zero
+        # width"), so empty lines simply have no texture.
+        if isempty(line)
             push!(textures, C_NULL)
             push!(linewidths, 0.0)
             push!(lineheights, 0.0)
             continue
         end
-        texture = SDL_CreateTextureFromSurface(renderer, surface)
-        SDL_FreeSurface(surface)
-        w_ref, h_ref = Ref{Cint}(0), Ref{Cint}(0)
-        SDL_QueryTexture(texture, C_NULL, C_NULL, w_ref, h_ref)
+        surface = try
+            SDL3.TTF_RenderText_Blended(font, String(line), scolor)
+        catch err
+            @warn "Rocks: could not render text" line exception = err
+            nothing
+        end
+        if surface === nothing || surface == C_NULL
+            push!(textures, C_NULL)
+            push!(linewidths, 0.0)
+            push!(lineheights, 0.0)
+            continue
+        end
+        texture = SDL3.CreateTextureFromSurface(renderer, surface)
+        SDL3.DestroySurface(surface)
+        tw, th = SDL3.GetTextureSize(texture)
         push!(textures, texture)
-        push!(linewidths, Float64(w_ref[]))
-        push!(lineheights, Float64(h_ref[]))
+        push!(linewidths, Float64(tw))
+        push!(lineheights, Float64(th))
     end
-    advance = max(Float64(TTF_FontLineSkip(font)), maximum(lineheights; init = 0.0))
+    advance = max(Float64(SDL3.TTF_GetFontLineSkip(font)),
+                  maximum(lineheights; init = 0.0))
     fiber.host = TextState(content, color, size, fontpath, renderer, textures,
                            linewidths, lineheights, advance)
     return fiber.host
 end
 
 function free_text!(state::TextState)
-    renderer = state.renderer
     for texture in state.textures
-        texture != C_NULL && SDL_DestroyTexture(texture)
+        texture != C_NULL && SDL3.DestroyTexture(texture)
     end
     empty!(state.textures)
     empty!(state.linewidths)
@@ -787,7 +879,7 @@ const IMAGE_CACHE_DIR = Ref{Union{Nothing,String}}(nothing)
 # Cached loaded surfaces, keyed by resolved source path. Surfaces are
 # renderer-independent and kept for the session so measuring and drawing an
 # image read the file only once.
-const IMAGE_SURFACES = Dict{String,Ptr{SDL_Surface}}()
+const IMAGE_SURFACES = Dict{String,SDL3.Surface}()
 
 # Resolve an `Image` `src` prop: local paths pass through; URLs are fetched
 # with `Downloads` into a per-session cache directory. Returns `nothing` when
@@ -798,7 +890,9 @@ function resolve_image_src(src)
         if IMAGE_CACHE_DIR[] === nothing
             IMAGE_CACHE_DIR[] = mkpath(joinpath(tempdir(), "rocks-images"))
         end
-        name = string(hash(src), ".", lowercase(splitext(src)[2]))
+        # A fixed seed: Julia salts the default string hash per process, so
+        # the cache file would get a new name on every run and never hit.
+        name = string(hash(src, UInt(0)), ".", lowercase(splitext(src)[2]))
         path = joinpath(IMAGE_CACHE_DIR[], name)
         isfile(path) && return path
         try
@@ -812,20 +906,53 @@ function resolve_image_src(src)
     return isfile(src) ? src : nothing
 end
 
+# The natural pixel size of an image file, read from its header. SDL3 keeps
+# the surface opaque and offers no query for its size, so the header is read
+# directly: PNG stores the size in the IHDR chunk, BMP in the DIB header.
+function image_file_size(path::AbstractString)
+    try
+        open(path, "r") do io
+            header = read(io, 32)
+            length(header) >= 26 || return (0.0, 0.0)
+            be32(b, i) = (UInt32(b[i]) << 24) | (UInt32(b[i+1]) << 16) |
+                         (UInt32(b[i+2]) << 8) | UInt32(b[i+3])
+            le32(b, i) = UInt32(b[i]) | (UInt32(b[i+1]) << 8) |
+                         (UInt32(b[i+2]) << 16) | (UInt32(b[i+3]) << 24)
+            if header[1:8] == UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+                return (Float64(be32(header, 17)), Float64(be32(header, 21)))
+            elseif header[1:2] == UInt8[0x42, 0x4d] # "BM"
+                return (Float64(abs(Int32(le32(header, 19)))),
+                        Float64(abs(Int32(le32(header, 23)))))
+            end
+            return (0.0, 0.0)
+        end
+    catch
+        return (0.0, 0.0)
+    end
+end
+
 # Loaded surface for an image source (cached). Returns C_NULL when the image
 # cannot be loaded.
 function image_surface(src::String)
     return get!(IMAGE_SURFACES, src) do
         path = resolve_image_src(src)
         path === nothing && return C_NULL
-        surface = IMG_Load(path)
+        surface = C_NULL
+        for loader in (SDL3.LoadPNG, SDL3.LoadBMP)
+            surface = try
+                loader(path)
+            catch
+                C_NULL
+            end
+            surface != C_NULL && break
+        end
         surface == C_NULL && @warn "Rocks: could not load image" src path
         return surface
     end
 end
 
 function free_image!(state::ImageState)
-    state.texture != C_NULL && SDL_DestroyTexture(state.texture)
+    state.texture != C_NULL && SDL3.DestroyTexture(state.texture)
     state.texture = C_NULL
     state.renderer = C_NULL
     return nothing
@@ -842,13 +969,12 @@ function ensure_image!(fiber, renderer)
     texture, w, h = C_NULL, 0.0, 0.0
     surface = image_surface(src)
     if surface != C_NULL
-        texture = SDL_CreateTextureFromSurface(renderer, surface)
+        texture = SDL3.CreateTextureFromSurface(renderer, surface)
         if texture == C_NULL
             @warn "Rocks: could not create texture for image" src
         else
-            w_ref, h_ref = Ref{Cint}(0), Ref{Cint}(0)
-            SDL_QueryTexture(texture, C_NULL, C_NULL, w_ref, h_ref)
-            w, h = Float64(w_ref[]), Float64(h_ref[])
+            tw, th = SDL3.GetTextureSize(texture)
+            w, h = Float64(tw), Float64(th)
         end
     end
     fiber.host = ImageState(texture, w, h, src, renderer)
@@ -864,41 +990,49 @@ function draw_image!(fiber, renderer)
         fill_rect(renderer, x, y, w, h)
         return
     end
-    dst = SDL_Rect(round(Int, x), round(Int, y), round(Int, w), round(Int, h))
-    SDL_RenderCopy(renderer, state.texture, C_NULL, Ref(dst))
+    dst = SDL3.FRect(round(Int, x), round(Int, y), round(Int, w), round(Int, h))
+    SDL3.RenderTexture(renderer, state.texture, nothing, dst)
     return nothing
 end
 
 # ---- the draw pass -------------------------------------------------------
 
 # Intersect an SDL clip rectangle with the previous one.
-function clip_rect(a::SDL_Rect, b::SDL_Rect)
+function clip_rect(a::SDL3.Rect, b::SDL3.Rect)
     x1, y1 = max(a.x, b.x), max(a.y, b.y)
     x2 = min(a.x + a.w, b.x + b.w)
     y2 = min(a.y + a.h, b.y + b.h)
-    return SDL_Rect(x1, y1, max(x2 - x1, 0), max(y2 - y1, 0))
+    return SDL3.Rect(x1, y1, max(x2 - x1, 0), max(y2 - y1, 0))
 end
+
+# SDL3 has no "is a clip set" query, so the backend keeps track of the clip
+# rectangle that is currently applied to a renderer.
+const RENDER_CLIP = Dict{SDL3.Renderer,SDL3.Rect}()
 
 # Draw a scroll container's children clipped to its viewport (and to any
 # outer clip, so nested scroll views compose correctly).
 function draw_scrolled!(fiber, renderer)
-    previous = Ref(SDL_Rect(0, 0, 0, 0))
-    had_clip = SDL_RenderIsClipEnabled(renderer) != SDL_FALSE
-    had_clip && SDL_RenderGetClipRect(renderer, previous)
+    previous = get(RENDER_CLIP, renderer, nothing)
     x, y, w, h = fiber.rect
-    clip = SDL_Rect(round(Int, x), round(Int, y), round(Int, w), round(Int, h))
-    had_clip && (clip = clip_rect(previous[], clip))
+    clip = SDL3.Rect(round(Int, x), round(Int, y), round(Int, w), round(Int, h))
+    previous === nothing || (clip = clip_rect(previous, clip))
     if clip.w <= 0 || clip.h <= 0
         return nothing
     end
-    SDL_RenderSetClipRect(renderer, Ref(clip))
+    SDL3.SetRenderClipRect(renderer, clip)
+    RENDER_CLIP[renderer] = clip
     try
         for child in fiber.children
             draw!(child, renderer)
         end
     finally
-        had_clip ? SDL_RenderSetClipRect(renderer, previous) :
-                   SDL_RenderSetClipRect(renderer, C_NULL)
+        if previous === nothing
+            SDL3.SetRenderClipRect(renderer, nothing)
+            delete!(RENDER_CLIP, renderer)
+        else
+            SDL3.SetRenderClipRect(renderer, previous)
+            RENDER_CLIP[renderer] = previous
+        end
     end
     draw_scrollbar!(fiber, renderer)
     return nothing
@@ -961,9 +1095,9 @@ function draw!(fiber, renderer)
             texture == C_NULL && continue
             w, h = state.linewidths[i], state.lineheights[i]
             (w <= 0 || h <= 0) && continue
-            dst = SDL_Rect(round(Int, x), round(Int, y + (i-1) * state.advance),
-                           round(Int, w), round(Int, h))
-            SDL_RenderCopy(renderer, texture, C_NULL, Ref(dst))
+            dst = SDL3.FRect(round(Int, x), round(Int, y + (i-1) * state.advance),
+                             round(Int, w), round(Int, h))
+            SDL3.RenderTexture(renderer, texture, nothing, dst)
         end
         return
     end
@@ -1148,11 +1282,11 @@ function draw_window!(fiber, present::Bool = true)
     state isa WindowState || return
     renderer = state.renderer
     set_color(renderer, get(fiber.props, :background, DEFAULT_WINDOW_BACKGROUND))
-    SDL_RenderClear(renderer)
+    SDL3.RenderClear(renderer)
     for child in fiber.children
         draw!(child, renderer)
     end
-    present && SDL_RenderPresent(renderer)
+    present && SDL3.RenderPresent(renderer)
     return nothing
 end
 
@@ -1193,29 +1327,24 @@ function screenshot(window, path::AbstractString)
     fiber === nothing &&
         error("no rendered window found in the given fiber tree")
     state = fiber.host
-    w_ref, h_ref = Ref{Cint}(0), Ref{Cint}(0)
-    SDL_GetWindowSize(state.ptr, w_ref, h_ref)
-    w, h = max(Int(w_ref[]), 1), max(Int(h_ref[]), 1)
+    w, h = SDL3.GetWindowSize(state.ptr)
+    w, h = max(Int(w), 1), max(Int(h), 1)
     # Redraw without presenting so the backbuffer holds the current frame,
     # read it, then present the redrawn frame.
     draw_window!(fiber, false)
-    surface = SDL_CreateRGBSurfaceWithFormat(
-        UInt32(0), Cint(w), Cint(h), Cint(32), UInt32(SDL_PIXELFORMAT_RGBA32),
-    )
-    surface == C_NULL &&
-        error("SDL_CreateRGBSurfaceWithFormat failed: $(unsafe_string(SDL_GetError()))")
-    s = unsafe_load(surface)
-    rect = SDL_Rect(Cint(0), Cint(0), Cint(w), Cint(h))
-    rc = SDL_RenderReadPixels(
-        state.renderer, Ref(rect), UInt32(SDL_PIXELFORMAT_RGBA32), s.pixels, s.pitch,
-    )
-    ok = Cint(0)
-    if rc == 0
-        ok = IMG_SavePNG(surface, String(path))
+    surface = try
+        SDL3.RenderReadPixels(state.renderer,
+                              SDL3.Rect(Cint(0), Cint(0), Cint(w), Cint(h)))
+    catch err
+        error("could not read the framebuffer: $(sprint(showerror, err))")
     end
-    SDL_FreeSurface(surface)
-    SDL_RenderPresent(state.renderer)
-    rc != 0 && error("SDL_RenderReadPixels failed: $(unsafe_string(SDL_GetError()))")
-    ok != 0 && error("IMG_SavePNG failed: $(unsafe_string(SDL_GetError()))")
+    try
+        SDL3.SavePNG(surface, String(path))
+    catch err
+        error("could not write the screenshot: $(sprint(showerror, err))")
+    finally
+        SDL3.DestroySurface(surface)
+    end
+    SDL3.RenderPresent(state.renderer)
     return path
 end

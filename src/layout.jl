@@ -214,15 +214,15 @@ function measure_text(fiber)
     lines = split(content, '\n'; keepempty = true)
     widths, heights = Float64[], Float64[]
     for line in lines
-        w_ref, h_ref = Ref{Cint}(0), Ref{Cint}(0)
-        TTF_SizeUTF8(font, String(line), w_ref, h_ref)
-        push!(widths, Float64(w_ref[]))
-        push!(heights, Float64(h_ref[]))
+        w, h = SDL3.TTF_GetStringSize(font, String(line))
+        push!(widths, Float64(w))
+        push!(heights, Float64(h))
     end
-    # Some glyphs (descenders, symbols) render one pixel taller than
-    # TTF_FontHeight. Advance by the taller of the line skip and the tallest
-    # line so textures are never squashed into a shorter destination rect.
-    advance = max(Float64(TTF_FontLineSkip(font)), maximum(heights; init = 0.0))
+    # Some glyphs (descenders, symbols) render one pixel taller than the font
+    # height. Advance by the taller of the line skip and the tallest line so
+    # textures are never squashed into a shorter destination rect.
+    advance = max(Float64(SDL3.TTF_GetFontLineSkip(font)),
+                  maximum(heights; init = 0.0))
     h = advance * (length(lines) - 1) + heights[end]
     return (maximum(widths; init = 0.0), h)
 end
@@ -360,14 +360,15 @@ function seed_split_ratio!(fiber)
     return nothing
 end
 
-# Natural image size scaled to the `width`/`height` props. The image loads
-# (and is cached) at measure time, so the size is known before the first draw.
+# Natural image size scaled to the `width`/`height` props. The image size is
+# read from the file header (SDL3 has no public query for the size of a
+# surface), so it is known before the first draw.
 function measure_image(fiber)
     src = string(get(fiber.props, :src, ""))
-    surface = image_surface(src)
-    surface == C_NULL && return (0.0, 0.0)
-    dims = unsafe_load(surface)
-    nw, nh = Float64(dims.w), Float64(dims.h)
+    path = resolve_image_src(src)
+    path === nothing && return (0.0, 0.0)
+    nw, nh = image_file_size(path)
+    (nw <= 0 || nh <= 0) && return (0.0, 0.0)
     w = get(fiber.props, :width, nothing)
     h = get(fiber.props, :height, nothing)
     if w !== nothing && h !== nothing

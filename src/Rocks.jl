@@ -1,8 +1,8 @@
 """
     Rocks
 
-A React(Native)-style GUI framework for Julia built on SDL2
-(via [SimpleDirectMediaLayer.jl](https://github.com/JuliaMultimedia/SimpleDirectMediaLayer.jl)).
+A React(Native)-style GUI framework for Julia built on SDL3
+(via [SDL3.jl](https://github.com/CarpeNecopinum/SDL3.jl)).
 
 Components are plain Julia functions — there is no separate component language.
 The [`@rock`](@ref) macro plays the role of React's (usually JSX-hidden)
@@ -38,8 +38,7 @@ provides the primitives: [`Window`](@ref), [`Box`](@ref), [`Text`](@ref) and
 """
 module Rocks
 
-using SimpleDirectMediaLayer
-using SimpleDirectMediaLayer.LibSDL2
+import SDL3
 using ColorTypes
 using Observables
 

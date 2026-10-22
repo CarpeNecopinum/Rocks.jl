@@ -16,7 +16,7 @@ architecture, conventions and gotchas.
 | `src/hooks.jl` | hook API, `PENDING_EFFECTS`, timers |
 | `src/fiber.jl` | `Fiber`, reconciler, unmount, window collection |
 | `src/layout.jl` | measure/place passes |
-| `src/backend.jl` | SDL2 windows/textures/fonts/colors/drawing |
+| `src/backend.jl` | SDL3 windows/textures/fonts/colors/drawing |
 | `src/events.jl` | event routing, hit testing, pressables |
 | `src/runtime.jl` | `render` main loop, `quit!` |
 | `src/components.jl` | Row/Column convenience components |
@@ -54,7 +54,7 @@ their children into the window rect.
 ## Testing headless
 
 - `julia --project=. -e 'using Pkg; Pkg.test()'` — all tests run with
-  `SDL_VIDEODRIVER=dummy`, no display needed.
+  `SDL_VIDEO_DRIVER=dummy`, no display needed.
 - Fiber trees without SDL: `Rocks.create_root(app, NamedTuple())` +
   `Rocks.perform_render!` + `Rocks.run_effects!` — hooks/reconciler are pure.
 - Synthetic pointer events: build an `SDL_Event`, `SDL_PushEvent`, then
@@ -95,7 +95,7 @@ their children into the window rect.
   props; keyboard events go to it; `Rocks.has_focus()` tells a component
   whether it holds focus.
 - No Xvfb is needed: screenshots render identically under
-  `SDL_VIDEODRIVER=dummy` (evaluated: the dummy driver implements window
+  `SDL_VIDEO_DRIVER=dummy` (evaluated: the dummy driver implements window
   framebuffers; `offscreen` behaves the same; x11/Xvfb only adds the real
   X11 code path, not pixels).
 - Never let `TTF_Quit` run without clearing `FONT_CACHE` (see
@@ -104,6 +104,6 @@ their children into the window rect.
 ## Commands
 
 - Test: `julia --project=. -e 'using Pkg; Pkg.test()'`
-- Headless screenshot: `SDL_VIDEODRIVER=dummy julia --project=. examples/screenshot.jl`
+- Headless screenshot: `SDL_VIDEO_DRIVER=dummy julia --project=. examples/screenshot.jl`
 - Resolve after deps change: `julia --project=. -e 'using Pkg; Pkg.resolve()'`
 - Example: `julia --project=. examples/counter.jl`

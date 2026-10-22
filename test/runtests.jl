@@ -1,33 +1,12 @@
 using Test
 using Rocks
 using ColorTypes: RGB, RGBA
-using SimpleDirectMediaLayer.LibSDL2:
-    SDL_PollEvent,
-    SDL_PushEvent,
-    SDL_GetCursor,
-    SDLK_ESCAPE,
-    SDL_Scancode,
-    SDL_GetWindowTitle,
-    SDL_GetWindowPosition,
-    SDL_GetMouseState,
-    SDL_SaveBMP_RW,
-    SDL_RWFromFile,
-    SDL_CreateRGBSurfaceWithFormat,
-    SDL_FillRect,
-    SDL_MapRGB,
-    SDL_FreeSurface,
-    SDL_GetError,
-    SDL_ConvertSurfaceFormat,
-    IMG_Load,
-    SDL_PIXELFORMAT_RGBA32,
-    SDL_PIXELFORMAT_RGB24,
-    SDL_SCANCODE_ESCAPE,
-    SDLK_ESCAPE
+import SDL3
 import Rocks: Text, Element, Window, Box, Pressable, Row, Column, ScrollView
 
 # All GUI-ish tests run against SDL's dummy video driver, so they work
 # without a display.
-ENV["SDL_VIDEODRIVER"] = "dummy"
+ENV["SDL_VIDEO_DRIVER"] = "dummy"
 
 # Render `app` (a component function) into a fiber tree, run mount effects,
 # call `f(root)` and tear everything down afterwards.
@@ -65,25 +44,15 @@ function sync_windows!(root)
 end
 
 drain_events!() = begin
-    ev = Ref{Rocks.SDL_Event}()
-    while SDL_PollEvent(ev) == 1
-        Rocks.dispatch_event!(ev[])
+    for ev in SDL3.PollEvents()
+        Rocks.dispatch_event!(ev)
     end
 end
 
 # (r, g, b, a) of the pixel at (x, y) of a PNG file.
 function png_pixel(path, x, y)
-    surf = IMG_Load(path)
-    surf == C_NULL && error("could not load $path: $(unsafe_string(SDL_GetError()))")
-    conv = SDL_ConvertSurfaceFormat(surf, UInt32(SDL_PIXELFORMAT_RGBA32), UInt32(0))
-    SDL_FreeSurface(surf)
-    conv == C_NULL && error("could not convert surface for $path")
-    s = unsafe_load(conv)
-    bytes = unsafe_wrap(Vector{UInt8}, Ptr{UInt8}(s.pixels), Int(s.pitch) * Int(s.h))
-    i = (y - 1) * Int(s.pitch) + 4 * (x - 1)
-    px = (bytes[i+1], bytes[i+2], bytes[i+3], bytes[i+4])
-    SDL_FreeSurface(conv)
-    return px
+    surf = SDL3.LoadPNG(path)
+    return SDL3.ReadSurfacePixel(surf, x - 1, y - 1)
 end
 
 # The first fiber in a subtree whose kind matches, and all of them.
@@ -105,28 +74,30 @@ function collect_kind(f, kind)
     return out
 end
 
+# SDL3 delivers every event through one 128 byte union. The wrapper keeps
+# the union intact and offers typed views, so a synthetic event is built by
+# storing the concrete payload struct into the event's memory.
+function push_event!(::Type{P}, type::Integer, payload::P) where {P}
+    event = SDL3.SDL_Event(type = type)
+    GC.@preserve event begin
+        unsafe_store!(Ptr{P}(pointer_from_objref(event)), payload)
+    end
+    @assert SDL3.PushEvent(event)
+    return event
+end
+
 function push_mouse!(fiber, type, x, y; button = 1)
     window = fiber
     while !Rocks.is_window(window)
         window = window.parent
     end
-    ev = Ref{Rocks.SDL_Event}()
-    p = Base.unsafe_convert(Ptr{Rocks.SDL_Event}, ev)
-    Rocks.setproperty!(p, :type, UInt32(type))
-    mouse = Rocks.SDL_MouseButtonEvent(
-        UInt32(type),
-        UInt32(0),
-        UInt32(window.host.id),
-        UInt32(0),
-        UInt8(button),
-        UInt8(1),
-        UInt8(1),
-        UInt8(0),
-        Int32(x),
-        Int32(y),
-    )
-    unsafe_store!(Rocks.getproperty(p, :button), mouse)
-    @assert SDL_PushEvent(p) >= 0
+    push_event!(SDL3.SDL_MouseButtonEvent, type,
+                SDL3.SDL_MouseButtonEvent(
+                    Int32(type), UInt32(0), UInt64(0),
+                    UInt32(window.host.id), UInt32(0),
+                    UInt8(button), true, UInt8(1), UInt8(0),
+                    Float32(x), Float32(y),
+                ))
     return nothing
 end
 
@@ -135,22 +106,13 @@ function push_motion!(fiber, x, y)
     while !Rocks.is_window(window)
         window = window.parent
     end
-    ev = Ref{Rocks.SDL_Event}()
-    p = Base.unsafe_convert(Ptr{Rocks.SDL_Event}, ev)
-    Rocks.setproperty!(p, :type, UInt32(Rocks.SDL_MOUSEMOTION))
-    motion = Rocks.SDL_MouseMotionEvent(
-        UInt32(Rocks.SDL_MOUSEMOTION),
-        UInt32(0),
-        UInt32(window.host.id),
-        UInt32(0),
-        UInt32(0x0001), # left button held
-        Int32(x),
-        Int32(y),
-        Int32(0),
-        Int32(0),
-    )
-    unsafe_store!(Rocks.getproperty(p, :motion), motion)
-    @assert SDL_PushEvent(p) >= 0
+    push_event!(SDL3.SDL_MouseMotionEvent, SDL3.SDL_EVENT_MOUSE_MOTION,
+                SDL3.SDL_MouseMotionEvent(
+                    Int32(SDL3.SDL_EVENT_MOUSE_MOTION), UInt32(0), UInt64(0),
+                    UInt32(window.host.id), UInt32(0),
+                    UInt32(0x0001), # left button held
+                    Float32(x), Float32(y), Float32(0), Float32(0),
+                ))
     return nothing
 end
 
@@ -161,42 +123,34 @@ function push_wheel!(fiber, x, y; dx = 0, dy = -1)
     end
     # Wheel events have no coordinates; real gestures follow mouse motion.
     Rocks.LAST_POINTER[window.host.id] = (Float64(x), Float64(y))
-    ev = Ref{Rocks.SDL_Event}()
-    p = Base.unsafe_convert(Ptr{Rocks.SDL_Event}, ev)
-    Rocks.setproperty!(p, :type, UInt32(Rocks.SDL_MOUSEWHEEL))
-    wheel = Rocks.SDL_MouseWheelEvent(
-        UInt32(Rocks.SDL_MOUSEWHEEL),
-        UInt32(0),
-        UInt32(window.host.id),
-        UInt32(0),
-        Int32(dx),
-        Int32(dy),
-        UInt32(0),
-        Cfloat(0),
-        Cfloat(0),
-    )
-    unsafe_store!(Rocks.getproperty(p, :wheel), wheel)
-    @assert SDL_PushEvent(p) >= 0
+    push_event!(SDL3.SDL_MouseWheelEvent, SDL3.SDL_EVENT_MOUSE_WHEEL,
+                SDL3.SDL_MouseWheelEvent(
+                    Int32(SDL3.SDL_EVENT_MOUSE_WHEEL), UInt32(0), UInt64(0),
+                    UInt32(window.host.id), UInt32(0),
+                    Float32(dx), Float32(dy), Int32(0),
+                    Float32(0), Float32(0), Int32(dx), Int32(dy),
+                ))
     return nothing
 end
 
 function push_window_event!(fiber, wev; data1 = 0, data2 = 0)
-    ev = Ref{Rocks.SDL_Event}()
-    p = Base.unsafe_convert(Ptr{Rocks.SDL_Event}, ev)
-    Rocks.setproperty!(p, :type, UInt32(Rocks.SDL_WINDOWEVENT))
-    window_event = Rocks.SDL_WindowEvent(
-        UInt32(Rocks.SDL_WINDOWEVENT),
-        UInt32(0),
-        UInt32(fiber.host.id),
-        UInt8(wev),
-        UInt8(0),
-        UInt8(0),
-        UInt8(0),
-        Int32(data1),
-        Int32(data2),
-    )
-    unsafe_store!(Rocks.getproperty(p, :window), window_event)
-    @assert SDL_PushEvent(p) >= 0
+    push_event!(SDL3.SDL_WindowEvent, wev,
+                SDL3.SDL_WindowEvent(
+                    Int32(wev), UInt32(0), UInt64(0),
+                    UInt32(fiber.host.id), Int32(data1), Int32(data2),
+                ))
+    return nothing
+end
+
+# A key event (down or up) carrying `key` and the SDL modifier bits.
+function push_key!(fiber, key; type = SDL3.SDL_EVENT_KEY_DOWN, mod = UInt16(0))
+    push_event!(SDL3.SDL_KeyboardEvent, type,
+                SDL3.SDL_KeyboardEvent(
+                    Int32(type), UInt32(0), UInt64(0),
+                    UInt32(fiber.host.id), UInt32(0), Int32(0),
+                    UInt32(key), mod, UInt16(0),
+                    type == SDL3.SDL_EVENT_KEY_DOWN, false,
+                ))
     return nothing
 end
 
@@ -208,6 +162,21 @@ center_of(fiber) = (
 fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
 
 @testset "Rocks" begin
+    @testset "text rendering available" begin
+        # The whole suite renders text, so SDL3_ttf has to be installed. A
+        # missing library is a failure, not a skip: a broken installation
+        # must not pass the suite silently.
+        if !SDL3.ttf_library_available()
+            error("SDL3_ttf is not available — install it (on Debian/Ubuntu: " *
+                  "libsdl3-ttf-dev) or point SDL3_TTF_LIBRARY_PATH at it")
+        end
+        @test SDL3.ttf_library_available()
+        # Initialising is the real check: it throws when the library cannot
+        # be loaded.
+        @test (SDL3.TTF_Init(); true)
+        @test SDL3.TTF_WasInit() >= 1
+    end
+
     @testset "elements" begin
         el = @rock Box(@rock Text("a"), @rock Text("b"); direction = :row, gap = 8)
         @test el.kind === Box
@@ -522,9 +491,8 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             w = sync_windows!(root)[1]
             text = w.children[1]
             font = Rocks.load_font(Rocks.default_font(), 12)
-            w_ref, h_ref = Ref{Cint}(0), Ref{Cint}(0)
-            Rocks.TTF_SizeUTF8(font, "Floating", w_ref, h_ref)
-            @test text.measured[2] == h_ref[]
+            _, h = SDL3.TTF_GetStringSize(font, "Floating")
+            @test text.measured[2] == h
         end
     end
 
@@ -654,32 +622,32 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             pressable = w.children[1]
             cx, cy = center_of(pressable)
 
-            push_mouse!(pressable, Rocks.SDL_MOUSEBUTTONDOWN, cx, cy)
+            push_mouse!(pressable, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, cx, cy)
             drain_events!()
             @test pressable.host.pressed == true
             @test pressed_log[] == 1
 
-            push_mouse!(pressable, Rocks.SDL_MOUSEBUTTONUP, cx, cy)
+            push_mouse!(pressable, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, cx, cy)
             drain_events!()
             @test clicks[] == 1
             @test pressable.host.pressed == false
 
             # motion triggers hover
-            push_mouse!(pressable, Rocks.SDL_MOUSEMOTION, cx, cy)
+            push_mouse!(pressable, SDL3.SDL_EVENT_MOUSE_MOTION, cx, cy)
             drain_events!()
             @test pressable.host.hovered == true
             @test hover_log[] == 1
 
             # release far away: no press
-            push_mouse!(pressable, Rocks.SDL_MOUSEBUTTONDOWN, cx, cy)
+            push_mouse!(pressable, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, cx, cy)
             drain_events!()
-            push_mouse!(pressable, Rocks.SDL_MOUSEBUTTONUP, 280, 180)
+            push_mouse!(pressable, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, 280, 180)
             drain_events!()
             @test clicks[] == 1
 
             # outside the pressable entirely: nothing happens
-            push_mouse!(pressable, Rocks.SDL_MOUSEBUTTONDOWN, 290, 190)
-            push_mouse!(pressable, Rocks.SDL_MOUSEBUTTONUP, 290, 190)
+            push_mouse!(pressable, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, 290, 190)
+            push_mouse!(pressable, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, 290, 190)
             drain_events!()
             @test clicks[] == 1
 
@@ -737,7 +705,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         with_tree(App) do root
             windows = sync_windows!(root)
             @test length(windows) == 1
-            @test unsafe_string(SDL_GetWindowTitle(windows[1].host.ptr)) == "Main"
+            @test SDL3.GetWindowTitle(windows[1].host.ptr) == "Main"
 
             open = root.hooks[1].value
             open[] = true
@@ -745,7 +713,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             Rocks.run_effects!()
             windows = sync_windows!(root)
             @test length(windows) == 2
-            titles = Set(unsafe_string(SDL_GetWindowTitle(w.host.ptr)) for w in windows)
+            titles = Set(SDL3.GetWindowTitle(w.host.ptr) for w in windows)
             @test titles == Set(["Main", "Dialog"])
 
             open[] = false
@@ -769,13 +737,13 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             state.needs_draw = false
 
             # exposure marks the window for redraw
-            push_window_event!(w, Rocks.SDL_WINDOWEVENT_EXPOSED)
+            push_window_event!(w, SDL3.SDL_EVENT_WINDOW_EXPOSED)
             drain_events!()
             @test state.needs_draw == true
             state.needs_draw = false
 
             # resize updates the size and marks for re-layout + redraw
-            push_window_event!(w, Rocks.SDL_WINDOWEVENT_RESIZED; data1 = 320, data2 = 240)
+            push_window_event!(w, SDL3.SDL_EVENT_WINDOW_RESIZED; data1 = 320, data2 = 240)
             drain_events!()
             @test state.width == 320 && state.height == 240
             @test state.needs_layout == true && state.needs_draw == true
@@ -784,7 +752,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             state.needs_draw = false
             state.needs_layout = false
             cx, cy = center_of(w.children[1])
-            push_mouse!(w, Rocks.SDL_MOUSEMOTION, cx, cy)
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_MOTION, cx, cy)
             drain_events!()
             @test state.needs_draw == true
             @test state.needs_layout == false # no re-layout on hover
@@ -792,7 +760,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
 
             # motion over empty space with unchanged hover state: no redraw
             state.needs_draw = false
-            push_mouse!(w, Rocks.SDL_MOUSEMOTION, cx, cy)
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_MOTION, cx, cy)
             drain_events!()
             @test state.needs_draw == false
 
@@ -829,9 +797,8 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
 
             # :mouse puts the top-left corner at the pointer
             f3 = window_fiber(position = :mouse)
-            mx, my = Ref{Cint}(0), Ref{Cint}(0)
-            SDL_GetMouseState(mx, my)
-            @test Rocks.window_position(f3) == (Int(mx[]), Int(my[]))
+            _, mx, my = SDL3.GetGlobalMouseState()
+            @test Rocks.window_position(f3) == (round(Int, mx), round(Int, my))
 
             # :centered places the window in the middle of the display bounds
             f4 = window_fiber(position = :centered)
@@ -1002,13 +969,13 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             # dragging the handle resizes the panes (ratio observable updated)
             hx, hy = round(Int, st.handle_rect[1] + st.handle_rect[3] / 2),
                      round(Int, st.handle_rect[2] + st.handle_rect[4] / 2)
-            push_mouse!(split, Rocks.SDL_MOUSEBUTTONDOWN, hx, hy)
+            push_mouse!(split, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, hx, hy)
             drain_events!()
             @test Rocks.ACTIVE_DRAG[] === split
-            push_mouse!(split, Rocks.SDL_MOUSEMOTION, hx + 95, hy) # +95px => ratio ~0.75
+            push_mouse!(split, SDL3.SDL_EVENT_MOUSE_MOTION, hx + 95, hy) # +95px => ratio ~0.75
             drain_events!()
             @test Rocks.ACTIVE_DRAG[] === split
-            push_mouse!(split, Rocks.SDL_MOUSEBUTTONUP, hx + 95, hy)
+            push_mouse!(split, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, hx + 95, hy)
             drain_events!()
             @test Rocks.ACTIVE_DRAG[] === nothing
             @test ratio[] > 0.6
@@ -1020,9 +987,9 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             @test slider.kind === Slider
             sx, sy = round(Int, slider.rect[1] + slider.rect[3] / 2),
                      round(Int, slider.rect[2] + slider.rect[4] / 2)
-            push_mouse!(slider, Rocks.SDL_MOUSEBUTTONDOWN, sx, sy)
+            push_mouse!(slider, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, sx, sy)
             drain_events!()
-            push_mouse!(slider, Rocks.SDL_MOUSEBUTTONUP, sx, sy)
+            push_mouse!(slider, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, sx, sy)
             drain_events!()
             @test 0.45 <= value[] <= 0.55
         end
@@ -1032,11 +999,12 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         # load a generated BMP through the Image element
         path = joinpath(tempdir(), "rocks-test-image.bmp")
         Rocks.init_backend()
-        surface = SDL_CreateRGBSurfaceWithFormat(0, 16, 8, 24, SDL_PIXELFORMAT_RGB24)
-        SDL_FillRect(surface, C_NULL, SDL_MapRGB(unsafe_load(surface).format, 200, 100, 50))
-        rw = SDL_RWFromFile(path, "wb")
-        @assert SDL_SaveBMP_RW(surface, rw, 1) == 0 # frees the RWops
-        SDL_FreeSurface(surface)
+        surface = SDL3.CreateSurface(16, 8, SDL3.SDL_PIXELFORMAT_RGB24)
+        details = SDL3.GetPixelFormatDetails(SDL3.SDL_PIXELFORMAT_RGB24)
+        color = SDL3.MapRGB(details, C_NULL, 200, 100, 50)
+        SDL3.FillSurfaceRect(surface, nothing, color)
+        SDL3.SaveBMP(surface, path)
+        SDL3.DestroySurface(surface)
 
         el = @rock Image(; src = path)
         f = Rocks.create_fiber(el, nothing)
@@ -1141,21 +1109,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         with_tree(App) do root
             windows = sync_windows!(root)
             w = windows[1]
-            ev = Ref{Rocks.SDL_Event}()
-            p = Base.unsafe_convert(Ptr{Rocks.SDL_Event}, ev)
-            Rocks.setproperty!(p, :type, UInt32(Rocks.SDL_KEYDOWN))
-            key = Rocks.SDL_KeyboardEvent(
-                UInt32(Rocks.SDL_KEYDOWN),
-                UInt32(0),
-                UInt32(w.host.id),
-                UInt8(1),
-                UInt8(0),
-                UInt8(0),
-                UInt8(0),
-                Rocks.SDL_Keysym(SDL_SCANCODE_ESCAPE, SDLK_ESCAPE, UInt16(0), UInt32(0)),
-            )
-            unsafe_store!(Rocks.getproperty(p, :key), key)
-            @assert SDL_PushEvent(p) >= 0
+            push_key!(w, SDL3.SDLK_ESCAPE)
             drain_events!()
             @test last_key[] == "Escape"
         end
@@ -1834,8 +1788,13 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 menu = [w for w in wins if Bool(get(w.props, :popup, false))][1]
                 @test Bool(get(menu.props, :resizable, false)) == false
                 @test get(menu.props, :menu_open, nothing) === ctx_open
+                # Syncing a popup window must not touch its title or its
+                # resizability: SDL3 rejects both on popup windows.
+                @test (Rocks.sync_window!(menu); true)
+                @test (Rocks.sync_window!([w for w in wins
+                                           if !Bool(get(w.props, :popup, false))][1]); true)
                 owner = [w for w in wins if !Bool(get(w.props, :popup, false))][1]
-                push_mouse!(owner, Rocks.SDL_MOUSEBUTTONDOWN, 100, 100)
+                push_mouse!(owner, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, 100, 100)
                 drain_events!()
                 Rocks.perform_render!(root)
                 Rocks.run_effects!()
@@ -1848,16 +1807,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 ctx_open[] = true
                 Rocks.perform_render!(root); Rocks.run_effects!()
                 wins = sync_windows!(root)
-                ev = Ref{Rocks.SDL_Event}()
-                p = Base.unsafe_convert(Ptr{Rocks.SDL_Event}, ev)
-                Rocks.setproperty!(p, :type, UInt32(Rocks.SDL_KEYDOWN))
-                key = Rocks.SDL_KeyboardEvent(UInt32(Rocks.SDL_KEYDOWN),
-                    UInt32(0), UInt32(wins[1].host.id), UInt8(0), UInt8(0),
-                    UInt8(0), UInt8(0),
-                    Rocks.SDL_Keysym(SDL_Scancode(0), UInt32(SDLK_ESCAPE),
-                                     Cuint(0), 0))
-                unsafe_store!(Rocks.getproperty(p, :key), key)
-                @assert SDL_PushEvent(p) >= 0
+                push_key!(wins[1], SDL3.SDLK_ESCAPE)
                 drain_events!()
                 Rocks.perform_render!(root)
                 Rocks.run_effects!()
@@ -1902,7 +1852,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 @test sv.host.thumb_rect[1] == sv.host.arrow_a_rect[1]
                 before = sv.host.offset
                 tx, ty, tw, th = sv.host.track_rect
-                push_mouse!(sv, Rocks.SDL_MOUSEBUTTONDOWN,
+                push_mouse!(sv, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN,
                             round(Int, tx + tw / 2), round(Int, ty + th - 5))
                 drain_events!()
                 sync_windows!(root)
@@ -1919,13 +1869,13 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 @test a[2] == 0
                 @test b[2] + b[4] == 100
                 @test sv.host.track_rect[2] == a[4]
-                push_mouse!(sv, Rocks.SDL_MOUSEBUTTONDOWN,
+                push_mouse!(sv, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN,
                             round(Int, b[1] + b[3] / 2),
                             round(Int, b[2] + b[4] / 2))
                 drain_events!()
                 sync_windows!(root)
                 @test sv.host.offset > 0
-                push_mouse!(sv, Rocks.SDL_MOUSEBUTTONDOWN,
+                push_mouse!(sv, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN,
                             round(Int, a[1] + a[3] / 2),
                             round(Int, a[2] + a[4] / 2))
                 drain_events!()
@@ -2057,17 +2007,21 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                           get(b.props, :background, nothing) == t.colors.selection]
                 # Clicking right after the "copy " prefix places the caret
                 # there (the caret box sits one selected char in).
-                push_mouse!(field, Rocks.SDL_MOUSEBUTTONDOWN,
+                push_mouse!(field, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN,
                             round(Int, rowx + tw("copy ") - 1),
                             round(Int, fy + 10))
                 drain_events!()
                 Rocks.perform_render!(root)
                 Rocks.run_effects!()
                 sync_windows!(root)
-                # A hovered text field shows the I-beam pointer.
-                @test SDL_GetCursor() == Rocks.TEXT_CURSOR[]
+                # A hovered text field shows the I-beam pointer. Headless
+                # video drivers have no system cursors at all, so the
+                # pointer is only checked where the driver supports it.
+                if !Rocks.CURSORS_UNAVAILABLE[]
+                    @test SDL3.GetCursor() == Rocks.TEXT_CURSOR[]
+                end
                 # The click completes: the caret stays at the boundary.
-                push_mouse!(field, Rocks.SDL_MOUSEBUTTONUP,
+                push_mouse!(field, SDL3.SDL_EVENT_MOUSE_BUTTON_UP,
                             round(Int, rowx + tw("copy ") - 1),
                             round(Int, fy + 10))
                 drain_events!()
@@ -2084,18 +2038,20 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 Rocks.perform_render!(root)
                 Rocks.run_effects!()
                 sync_windows!(root)
-                @test SDL_GetCursor() == Rocks.ARROW_CURSOR[]
+                if !Rocks.CURSORS_UNAVAILABLE[]
+                    @test SDL3.GetCursor() == Rocks.ARROW_CURSOR[]
+                end
 
                 # Hold-and-drag selects: press after the "c" and drag to the
                 # end → selection "opy me".
                 s0 = round(Int, rowx + tw("c") - 1)
-                push_mouse!(field, Rocks.SDL_MOUSEBUTTONDOWN, s0,
+                push_mouse!(field, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, s0,
                             round(Int, fy + 10))
                 drain_events!()
                 Rocks.perform_render!(root)
                 Rocks.run_effects!(); sync_windows!(root)
                 push_motion!(field, round(Int, rowx + tw("copy me")) + 30, round(Int, fy + 10))
-                push_mouse!(field, Rocks.SDL_MOUSEBUTTONUP,
+                push_mouse!(field, SDL3.SDL_EVENT_MOUSE_BUTTON_UP,
                             round(Int, rowx + tw("copy me")) + 30,
                             round(Int, fy + 10))
                 drain_events!()
@@ -2105,7 +2061,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 @test isapprox(sels()[1].rect[3],
                                tw("opy me"); atol = 3.0)
                 # Copy through the field's right-click menu.
-                push_mouse!(field, Rocks.SDL_MOUSEBUTTONDOWN,
+                push_mouse!(field, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN,
                             round(Int, rowx + 5), round(Int, fy + 10);
                             button = 3)
                 drain_events!()
@@ -2114,7 +2070,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 # The right-button release must not disturb the selection
                 # (the caret used to jump to the click point on release and
                 # collapse the drag selection).
-                push_mouse!(field, Rocks.SDL_MOUSEBUTTONUP,
+                push_mouse!(field, SDL3.SDL_EVENT_MOUSE_BUTTON_UP,
                             round(Int, rowx + 5), round(Int, fy + 10);
                             button = 3)
                 drain_events!()
@@ -2134,12 +2090,12 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 @test pressable_with(root, "Copy") === nothing
 
                 # Paste through the menu at the start of the field.
-                push_mouse!(field, Rocks.SDL_MOUSEBUTTONDOWN,
+                push_mouse!(field, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN,
                             round(Int, rowx - 2), round(Int, fy + 10))
                 drain_events!()
                 Rocks.perform_render!(root)
                 Rocks.run_effects!(); sync_windows!(root)
-                push_mouse!(field, Rocks.SDL_MOUSEBUTTONDOWN,
+                push_mouse!(field, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN,
                             round(Int, rowx + 5), round(Int, fy + 10);
                             button = 3)
                 drain_events!()

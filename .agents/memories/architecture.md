@@ -1,16 +1,21 @@
 ---
 id: arch_001
 title: Rocks.jl architecture decisions
-content: SDL2 not SDL3; host elements as singleton constants; whole-tree re-render on dirty; index-based reconciler with kind/key compatibility; components are plain functions called with props as kwargs
+content: SDL3 via the SDL3.jl wrapper; host elements as singleton constants; whole-tree re-render on dirty; index-based reconciler with kind/key compatibility; components are plain functions called with props as kwargs
 importance: high
 tags: architecture, rocks, sdl, react
 ---
 
-Key architecture decisions of Rocks.jl (React-style GUI framework on SDL2):
+Key architecture decisions of Rocks.jl (React-style GUI framework on SDL3):
 
-- **SDL2, not SDL3**: the user requested SDL3 via
-  SimpleDirectMediaLayer.jl, but that package only ships SDL2 bindings
-  (`LibSDL2` module, no SDL3 branch as of 2026-10). The user accepted SDL2.
+- **SDL3, through the local SDL3.jl wrapper**: the wrapper lives next to
+  Rocks (`../SDL3.jl`, wired up as a path dependency) and binds SDL3 and
+  SDL3_ttf directly.  The earlier SDL2 binding (SimpleDirectMediaLayer.jl)
+  was dropped in October 2026 — it could not set window titles reliably and
+  had no SDL3 support.  Two consequences: the video driver is selected with
+  `SDL_VIDEO_DRIVER` (not `SDL_VIDEODRIVER`), and SDL3 exports a `Window`
+  *type*, so `using Rocks` and `using SDL3` in one session make the bare
+  name `Window` ambiguous — qualify it or `import SDL3` qualified.
 - **Host elements are singleton constants** (`Window`, `Box`, `Text`,
   `Pressable`) compared with `===` during reconciliation; components are
   plain Julia functions. `@rock` splits positional children from keyword
@@ -26,15 +31,18 @@ Key architecture decisions of Rocks.jl (React-style GUI framework on SDL2):
 - **Naming**: entry point is `render` (Base.run clash), `Rocks.run` is a
   qualified alias; `Text` clashes with `Base.Text` so examples do
   `import Rocks: Text`.
-- **Testing**: headless via `SDL_VIDEODRIVER=dummy`; synthetic events are
-  pushed through the real `dispatch_event!`; `FONT_CACHE` must be cleared
-  on `TTF_Quit` (stale pointers segfault).
+- **Testing**: headless via `SDL_VIDEO_DRIVER=dummy`; synthetic events are
+  pushed through the real `dispatch_event!`.  SDL3 delivers every event
+  through one 128 byte union, so a synthetic event is built by storing the
+  concrete payload struct into the event's memory (the wrapper's `as_*`
+  views then read it).  `FONT_CACHE` must be cleared on `TTF_Quit` and
+  `IMAGE_SURFACES` on `SDL_Quit` (stale pointers crash).
 - **Screenshots**: `screenshot(window, path)` redraws the window without
-  presenting, reads the backbuffer with `SDL_RenderReadPixels` into an
-  `SDL_PIXELFORMAT_RGBA32` surface and saves it with `IMG_SavePNG`. The
+  presenting, reads the backbuffer with `SDL_RenderReadPixels` (which returns
+  a surface in SDL3) and saves it with `SDL_SavePNG`. The
   pixels come from the renderer, not the video driver: the dummy driver
   implements window framebuffers, so pixel tests work fully headless with
-  `SDL_VIDEODRIVER=dummy` (verified: dummy, `offscreen` and x11/Xvfb produce
+  `SDL_VIDEO_DRIVER=dummy` (verified: dummy, `offscreen` and x11/Xvfb produce
   identical pixels; an xvfb layer was built and then dropped as
   unnecessary). Headless runs use `render(app; frames, screenshot)`.
 - **Material3**: a submodule (`src/Material3/`) with M3-themed components

@@ -4,24 +4,21 @@
 #   julia --project examples/image.jl
 
 using Rocks
-using SimpleDirectMediaLayer.LibSDL2
+import SDL3 # qualified: SDL3 exports a `Window` type alias, Rocks a component
 import Rocks: Text
 
 const IMG_W, IMG_H = 240, 160
 
 # Generate a gradient BMP so the example is self-contained.
 function make_image(path)
-    surface = SDL_CreateRGBSurfaceWithFormat(0, IMG_W, IMG_H, 24, SDL_PIXELFORMAT_RGB24)
-    pixels = Ptr{UInt8}(unsafe_load(surface).pixels)
+    surface = SDL3.CreateSurface(IMG_W, IMG_H, SDL3.SDL_PIXELFORMAT_RGB24)
     for y in 0:IMG_H-1, x in 0:IMG_W-1
-        offset = (y * IMG_W + x) * 3
-        unsafe_store!(pixels, round(UInt8, 60 + 160 * x / (IMG_W - 1)), offset + 1)
-        unsafe_store!(pixels, round(UInt8, 40 + 140 * y / (IMG_H - 1)), offset + 2)
-        unsafe_store!(pixels, UInt8(180), offset + 3)
+        r = round(UInt8, 60 + 160 * x / (IMG_W - 1))
+        g = round(UInt8, 40 + 140 * y / (IMG_H - 1))
+        SDL3.WriteSurfacePixel(surface, x, y, r, g, UInt8(180), 255)
     end
-    rw = SDL_RWFromFile(path, "wb")
-    @assert SDL_SaveBMP_RW(surface, rw, 1) == 0 # frees the RWops
-    SDL_FreeSurface(surface)
+    SDL3.SaveBMP(surface, path)
+    SDL3.DestroySurface(surface)
     return path
 end
 

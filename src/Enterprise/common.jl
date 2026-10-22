@@ -84,10 +84,8 @@ end
 function text_width(s, t::Theme; size = t.metrics.font_size)
     path = t.font === nothing ? default_font() : t.font
     font = load_font(path, max(round(Int, size), 1))
-    w = Ref{Cint}(0)
-    h = Ref{Cint}(0)
-    TTF_SizeUTF8(font, String(s), w, h)
-    return Float64(w[])
+    w, _ = SDL3.TTF_GetStringSize(font, String(s))
+    return Float64(w)
 end
 
 # A 1px separator used by menus, toolbars and status bars.
@@ -133,25 +131,14 @@ function grip_dots(; rows = 3, color = nothing)
     return @rock Column(lines...; gap = 2, align = :center)
 end
 
-# Screen origin (x, y) of the OS window that `fiber` belongs to — the base
-# coordinate for popup menus, which open as separate borderless windows so
-# they can grow beyond their owner. `(0, 0)` before the owner window exists.
-function window_origin(fiber)
-    f = fiber
-    while f !== nothing && !is_window(f)
-        f = f.parent
-    end
-    f === nothing && return (0, 0)
-    (f.host isa WindowState && f.host.ptr != C_NULL) || return (0, 0)
-    x, y = Ref{Cint}(0), Ref{Cint}(0)
-    SDL_GetWindowPosition(f.host.ptr, x, y)
-    return (Int(x[]), Int(y[]))
-end
-
 # The borderless OS-window popup that hosts a menu: content = a bevel box of
 # item rows sized to the window so nothing clips, `:menu_open` carries the
 # open observable that `close_open_menus!` flips when the user clicks or
 # presses Escape elsewhere.
+#
+# `x`/`y` are the offset of the popup inside the owner window's client area:
+# the popup is created as a child popup of that window, so it lines up with
+# the control that opened it on every platform.
 function menu_popup(items, t, close; x, y, width, height, open)
     rows = Any[menu_item_row(normalize_item(i), t, close; width = width - 4)
                for i in items]

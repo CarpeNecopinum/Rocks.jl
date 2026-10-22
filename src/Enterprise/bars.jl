@@ -143,22 +143,38 @@ function MenuBar(; menus = Any[], position = :absolute, fill = true,
         cursor += w
     end
     close() = (open[] = 0)
+    # The laid-out rect of the i-th menu title button, in the coordinates of
+    # the owner window's client area. The dropdown is anchored to it, so it
+    # opens right below its title on every platform.
+    title_rect(i) = begin
+        for child in self.children
+            child.kind === _PRESSABLE || continue
+            kids = child.children
+            i <= length(kids) || continue
+            return kids[i].rect
+        end
+        return nothing
+    end
     buttons = Any[]
     for (i, m) in enumerate(entries)
         active = open_idx == i
         # Flat until clicked: no hover highlight (it breaks the plastic look
         # of the bar). Only the open menu gets the recessed plastic
-        # highlight, like Win7. The press callback receives the pointer
-        # position when it takes three arguments; the menu opens as its own
-        # borderless OS window pinned right under the title.
+        # highlight, like Win7. The dropdown opens as its own borderless OS
+        # window, anchored to the title below it.
         push!(buttons, @rock Pressable(
             text_element(m.label; color = t.colors.text,
                          size = t.metrics.font_size, font = t.font);
             on_press = () -> begin
                 if !active
-                    (ox, oy) = window_origin(self)
-                    menu_x[] = ox + xs[i]
-                    menu_y[] = oy + t.metrics.menu_height
+                    rect = title_rect(i)
+                    if rect === nothing
+                        menu_x[] = xs[i]
+                        menu_y[] = t.metrics.menu_height
+                    else
+                        menu_x[] = rect[1]
+                        menu_y[] = rect[2] + rect[4]
+                    end
                 end
                 open[] = active ? 0 : i
             end,
@@ -202,10 +218,12 @@ end
 """
     Enterprise.ContextMenu(; open, x = 0, y = 0, items = Any[], width = 180)
 
-A popup menu that opens as its own borderless OS window at global screen
-coordinates `(x, y)` — not clipped by its owner window, and always painted
-above every other window. `open` is an `Observable{Bool}`; item callbacks
-close it automatically. Clicking elsewhere or pressing Escape dismisses it.
+A popup menu that opens as its own borderless OS window — a child popup of
+the window it is rendered in — so it is never clipped by the edges of that
+window and always paints above every other window's content. `x`/`y` are
+the offset of the menu inside the owner window's client area. `open` is an
+`Observable{Bool}`; item callbacks close it automatically. Clicking elsewhere
+or pressing Escape dismisses it.
 
 ```julia
 @rock E.ContextMenu(open = open, x = 100, y = 120,

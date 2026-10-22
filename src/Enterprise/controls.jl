@@ -352,11 +352,11 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
                 if btn == 3
                     # Right-click opens the edit menu at the pointer (the
                     # caret and selection stay as they are). The menu opens
-                    # as its own borderless OS window pinned just below the
-                    # pointer, in screen coordinates.
-                    (wx, wy) = window_origin(self)
-                    menu_x[] = wx + px
-                    menu_y[] = wy + py + 2.0
+                    # as its own borderless OS window, a popup of the owner
+                    # window, so it is anchored at the pointer in the owner
+                    # window's client area.
+                    menu_x[] = px
+                    menu_y[] = py + 2.0
                     menu_open[] = true
                     return nothing
                 end
@@ -403,7 +403,7 @@ end
 function clipboard_set_text!(s)
     s == "" && return
     try
-        SDL_SetClipboardText(s)
+        SDL3.SetClipboardText(s)
     catch err
         @warn "Rocks: could not set the clipboard text" err
     end
@@ -412,11 +412,7 @@ end
 
 function clipboard_get_text()
     try
-        p = SDL_GetClipboardText()
-        (p === nothing || p == C_NULL) && return ""
-        s = unsafe_string(p)
-        SDL_free(p)
-        return s
+        return SDL3.GetClipboardText()
     catch
         return ""
     end

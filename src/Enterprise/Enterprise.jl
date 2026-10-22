@@ -11,8 +11,7 @@ using ..Rocks: @rock, @use, Observable, Element, props_dict, _PRESSABLE, _BOX,
     _SLIDER, _SCROLLVIEW, _SPLIT, _WINDOW, flat_children, Row, Column, Box,
     Text, Pressable, ScrollView, Mechanics, createContext, has_focus, unfocus!,
     Window, useEffect, use_fiber, LinearGradient, default_font, load_font,
-    TTF_SizeUTF8, LAST_KEYMODS, SDL_SetClipboardText, SDL_GetClipboardText,
-    SDL_free, is_window, WindowState, SDL_GetWindowPosition
+    SDL3, LAST_KEYMODS, is_window, WindowState
 
 include("theme.jl")
 include("common.jl")

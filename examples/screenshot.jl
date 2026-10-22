@@ -3,7 +3,7 @@
 # input. Useful for tests, CI and README images:
 #
 #   julia --project examples/screenshot.jl                        # real window
-#   SDL_VIDEODRIVER=dummy julia --project examples/screenshot.jl  # headless
+#   SDL_VIDEO_DRIVER=dummy julia --project examples/screenshot.jl  # headless
 #
 # On a desktop the window flashes briefly, under the dummy driver nothing
 # appears (the software renderer still writes real pixels), and

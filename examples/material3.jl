@@ -2,7 +2,7 @@
 # ThemeContext with a live light/dark switch.
 #
 #   julia --project examples/material3.jl
-#   SDL_VIDEODRIVER=dummy julia --project examples/material3.jl   # headless
+#   SDL_VIDEO_DRIVER=dummy julia --project examples/material3.jl   # headless
 #
 # The theme is an `Observable{Theme}` provided through ThemeContext.provider —
 # toggling the switch replaces the Theme instance and every component

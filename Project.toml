@@ -7,12 +7,15 @@ authors = ["Rocks.jl contributors"]
 ColorTypes = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
 Downloads = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
 Observables = "510215fc-4207-5dde-b226-833fc4488ee2"
-SimpleDirectMediaLayer = "98e33af6-2ee5-5afd-9e75-cbc738b767c4"
+SDL3 = "d6436c51-22c4-47c5-9af2-69281707dbc3"
+
+[sources]
+SDL3 = {rev = "master", url = "https://github.com/CarpeNecopinum/SDL3.jl.git"}
 
 [compat]
 ColorTypes = "0.11, 0.12"
 Observables = "0.5"
-SimpleDirectMediaLayer = "0.5"
+SDL3 = "0.1"
 julia = "1.10"
 
 [extras]

@@ -156,8 +156,8 @@ const Pressable = _PressableKind()
     Image
 
 Host element kind for a graphics file. `src` is a path or an URL (fetched
-with `Downloads` and cached in a temporary directory) to a PNG/JPG/BMP/...
-file, loaded through SDL2_image.
+with `Downloads` and cached in a temporary directory) to a PNG or BMP file,
+the formats SDL3 loads natively.
 
 Props: `src` (required), `width`/`height` — scale to `width` (keeping the
 aspect ratio) when only one is given, stretch when both are given, natural

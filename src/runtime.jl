@@ -94,7 +94,7 @@ up to ~250ms waiting for events), and `screenshot = path` captures the first
 window into a PNG file right before the application shuts down. Together
 they enable fully headless runs — no window is ever shown, but
 [`screenshot`](@ref) still captures real pixels (with
-`SDL_VIDEODRIVER=dummy`):
+`SDL_VIDEO_DRIVER=dummy`):
 
 ```julia
 render(App; frames = 3, screenshot = "app.png")
@@ -118,16 +118,16 @@ function render(app; kwargs...)
     try
         perform_render!(root)
         run_effects!()
-        event = Ref{SDL_Event}()
         windows = Fiber[]
         frame = 0
         while RUNNING[]
             # Block until the next event or until the next timer is due, so
             # an idle application neither redraws nor burns CPU.
-            if SDL_WaitEventTimeout(event, event_wait_timeout_ms()) == 1
-                dispatch_event!(event[])
-                while SDL_PollEvent(event) == 1
-                    dispatch_event!(event[])
+            event = SDL3.WaitEventTimeout(event_wait_timeout_ms())
+            if event !== nothing
+                dispatch_event!(event)
+                for more in SDL3.PollEvents()
+                    dispatch_event!(more)
                 end
             end
             fire_timers!()

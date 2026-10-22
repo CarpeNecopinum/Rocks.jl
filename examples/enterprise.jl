@@ -1,7 +1,7 @@
 # Windows 7 / Winforms showcase for Rocks.Enterprise.
 #
 #   julia --project examples/enterprise.jl
-#   SDL_VIDEODRIVER=dummy julia --project examples/enterprise.jl  # headless
+#   SDL_VIDEO_DRIVER=dummy julia --project examples/enterprise.jl  # headless
 #
 # The app is a mock system utility: menu bar, toolbar, tabbed pages with group
 # boxes and sunken inputs, list/grid views, progress and slider controls, a

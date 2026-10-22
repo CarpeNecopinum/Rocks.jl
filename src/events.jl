@@ -20,9 +20,12 @@ const LAST_POINTER = Dict{UInt32,Tuple{Float64,Float64}}()
 # text fields can distinguish Ctrl-combos from plain typed characters.
 const LAST_KEYMODS = Ref(Cuint(0))
 
-const HAND_CURSOR = Ref{Ptr{SDL_Cursor}}(C_NULL)
-const ARROW_CURSOR = Ref{Ptr{SDL_Cursor}}(C_NULL)
-const TEXT_CURSOR = Ref{Ptr{SDL_Cursor}}(C_NULL)
+const HAND_CURSOR = Ref{SDL3.Cursor}(C_NULL)
+const ARROW_CURSOR = Ref{SDL3.Cursor}(C_NULL)
+const TEXT_CURSOR = Ref{SDL3.Cursor}(C_NULL)
+
+# Set when the video driver has no system cursors (headless drivers).
+const CURSORS_UNAVAILABLE = Ref(false)
 
 const HOVERED_ACTIVE = Ref(false)
 
@@ -91,9 +94,8 @@ end
 function pointer_position(wid)
     pos = get(LAST_POINTER, wid, nothing)
     pos !== nothing && return pos
-    x, y = Ref{Cint}(0), Ref{Cint}(0)
-    SDL_GetMouseState(x, y)
-    return (Float64(x[]), Float64(y[]))
+    _, x, y = SDL3.GetMouseState()
+    return (Float64(x), Float64(y))
 end
 
 "Nearest scrollable ancestor of a hit target, not crossing window boundaries."
@@ -369,10 +371,16 @@ function has_focus()
 end
 
 function update_cursor()
-    if HAND_CURSOR[] == C_NULL
-        HAND_CURSOR[] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_HAND)
-        ARROW_CURSOR[] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW)
-        TEXT_CURSOR[] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_IBEAM)
+    if HAND_CURSOR[] == C_NULL && !CURSORS_UNAVAILABLE[]
+        try
+            HAND_CURSOR[] = SDL3.CreateSystemCursor(SDL3.SDL_SYSTEM_CURSOR_POINTER)
+            ARROW_CURSOR[] = SDL3.CreateSystemCursor(SDL3.SDL_SYSTEM_CURSOR_DEFAULT)
+            TEXT_CURSOR[] = SDL3.CreateSystemCursor(SDL3.SDL_SYSTEM_CURSOR_TEXT)
+        catch
+            # Headless video drivers have no system cursors; the pointer then
+            # stays whatever the window manager shows.
+            CURSORS_UNAVAILABLE[] = true
+        end
     end
     cursor = ARROW_CURSOR[]
     if HOVERED_ACTIVE[]
@@ -382,7 +390,7 @@ function update_cursor()
                          for p in values(HOVERED))
         cursor = wants_text ? TEXT_CURSOR[] : HAND_CURSOR[]
     end
-    SDL_SetCursor(cursor)
+    cursor == C_NULL || SDL3.SetCursor(cursor)
     return nothing
 end
 
@@ -431,36 +439,36 @@ end
 
 Route one SDL event to the UI tree. Called by the main loop in runtime.jl.
 """
-function dispatch_event!(event::SDL_Event)
+function dispatch_event!(event::SDL3.Event)
     ty = event.type
-    if ty == SDL_QUIT
+    if ty == SDL3.SDL_EVENT_QUIT
         quit!()
-    elseif ty == SDL_WINDOWEVENT
-        wid = event.window.windowID
-        wev = event.window.event
-        if wev == SDL_WINDOWEVENT_CLOSE
-            handle_close!(wid)
-        elseif wev == SDL_WINDOWEVENT_EXPOSED
-            # The window manager wants the window repainted (it was covered,
-            # restored, ...).
-            mark_window_draw!(wid)
-        elseif wev == SDL_WINDOWEVENT_RESIZED || wev == SDL_WINDOWEVENT_SIZE_CHANGED
-            # Resized windows are re-laid out and redrawn without re-running
-            # components.
-            fiber = get(WINDOW_BY_ID, wid, nothing)
-            if fiber !== nothing && fiber.host isa WindowState
-                fiber.host.width = Int(event.window.data1)
-                fiber.host.height = Int(event.window.data2)
-                fiber.host.needs_layout = true
-                fiber.host.needs_draw = true
-            end
+    elseif ty == SDL3.SDL_EVENT_WINDOW_CLOSE_REQUESTED
+        handle_close!(SDL3.as_window(event).windowID)
+    elseif ty == SDL3.SDL_EVENT_WINDOW_EXPOSED
+        # The window manager wants the window repainted (it was covered,
+        # restored, ...).
+        mark_window_draw!(SDL3.as_window(event).windowID)
+    elseif ty == SDL3.SDL_EVENT_WINDOW_RESIZED ||
+           ty == SDL3.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED
+        # Resized windows are re-laid out and redrawn without re-running
+        # components.
+        wev = SDL3.as_window(event)
+        fiber = get(WINDOW_BY_ID, wev.windowID, nothing)
+        if fiber !== nothing && fiber.host isa WindowState
+            fiber.host.width = Int(wev.data1)
+            fiber.host.height = Int(wev.data2)
+            fiber.host.needs_layout = true
+            fiber.host.needs_draw = true
         end
-    elseif ty == SDL_MOUSEBUTTONDOWN
-        wid = event.button.windowID
+    elseif ty == SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN
+        mev = SDL3.as_mouse_button(event)
+        wid = mev.windowID
         fiber = get(WINDOW_BY_ID, wid, nothing)
         fiber === nothing && return
-        mx, my = event.button.x, event.button.y
-        LAST_POINTER[wid] = (Float64(mx), Float64(my))
+        mx, my = Float64(mev.x), Float64(mev.y)
+        button = Int(mev.button)
+        LAST_POINTER[wid] = (mx, my)
         # The first click only dismisses open popup menus (Windows gesture).
         close_open_menus!(wid) && return
         target = hit_test(fiber, mx, my)
@@ -513,34 +521,35 @@ function dispatch_event!(event::SDL_Event)
 
         pressable = find_pressable(target)
         if pressable !== nothing && !Bool(get(pressable.props, :disabled, false))
-            ACTIVE_PRESS[(wid, event.button.button)] = pressable
+            ACTIVE_PRESS[(wid, UInt8(button))] = pressable
             pressable.host isa PressState && (pressable.host.pressed = true)
-            callback_press!(pressable.props, :on_press_in,
-                            Float64(mx), Float64(my), Int(event.button.button))
+            callback_press!(pressable.props, :on_press_in, mx, my, button)
             mark_window_draw!(wid)
         end
-    elseif ty == SDL_MOUSEBUTTONUP
-        wid = event.button.windowID
+    elseif ty == SDL3.SDL_EVENT_MOUSE_BUTTON_UP
+        mev = SDL3.as_mouse_button(event)
+        wid = mev.windowID
         if ACTIVE_DRAG[] !== nothing
             drag_end!(ACTIVE_DRAG[])
             ACTIVE_DRAG[] = nothing
             return
         end
-        pressable = pop!(ACTIVE_PRESS, (wid, event.button.button), nothing)
+        button = Int(mev.button)
+        pressable = pop!(ACTIVE_PRESS, (wid, UInt8(button)), nothing)
         pressable === nothing && return
-        mx, my = event.button.x, event.button.y
+        mx, my = Float64(mev.x), Float64(mev.y)
         pressable.host isa PressState && (pressable.host.pressed = false)
         callback(pressable.props, :on_press_out)
         if pressable.mounted && pressable.kind === _PRESSABLE &&
            inside(pressable.rect, mx, my) && !Bool(get(pressable.props, :disabled, false))
-            callback_press!(pressable.props, :on_press, Float64(mx), Float64(my),
-                            Int(event.button.button))
+            callback_press!(pressable.props, :on_press, mx, my, button)
         end
         mark_window_draw!(wid)
-    elseif ty == SDL_MOUSEMOTION
-        wid = event.motion.windowID
-        mx, my = event.motion.x, event.motion.y
-        LAST_POINTER[wid] = (Float64(mx), Float64(my))
+    elseif ty == SDL3.SDL_EVENT_MOUSE_MOTION
+        mev = SDL3.as_mouse_motion(event)
+        wid = mev.windowID
+        mx, my = Float64(mev.x), Float64(mev.y)
+        LAST_POINTER[wid] = (mx, my)
         if ACTIVE_DRAG[] !== nothing
             drag_update!(ACTIVE_DRAG[], mx, my)
             return
@@ -549,12 +558,12 @@ function dispatch_event!(event::SDL_Event)
         fiber === nothing && (set_hover!(wid, nothing); return)
         # Holding the pointer down over a text field and dragging extends its
         # selection (the field's `on_drag` sees pointer positions).
-        pressable = get(ACTIVE_PRESS, (wid, 1), nothing)
+        pressable = get(ACTIVE_PRESS, (wid, UInt8(1)), nothing)
         if pressable !== nothing && haskey(pressable.props, :on_drag)
             f = pressable.props[:on_drag]
             if f isa Function
                 try
-                    f(Float64(mx), Float64(my))
+                    f(mx, my)
                 catch err
                     @warn "Rocks: callback :on_drag failed" exception =
                         (err, catch_backtrace())
@@ -564,30 +573,32 @@ function dispatch_event!(event::SDL_Event)
         end
         target = hit_test(fiber, mx, my)
         set_hover!(wid, find_pressable(target))
-    elseif ty == SDL_MOUSEWHEEL
-        wid = event.wheel.windowID
+    elseif ty == SDL3.SDL_EVENT_MOUSE_WHEEL
+        wev = SDL3.as_mouse_wheel(event)
+        wid = wev.windowID
         fiber = get(WINDOW_BY_ID, wid, nothing)
         fiber === nothing && return
         x, y = pointer_position(wid)
         target = hit_test(fiber, x, y)
         scroll = find_scrollable(target)
         scroll === nothing && return
-        dx = Float64(event.wheel.x)
-        dy = Float64(event.wheel.y)
+        dx = Float64(wev.x)
+        dy = Float64(wev.y)
         if dx == 0.0 && dy == 0.0
-            dx = Float64(event.wheel.preciseX)
-            dy = Float64(event.wheel.preciseY)
+            dx = Float64(wev.integer_x)
+            dy = Float64(wev.integer_y)
         end
-        if event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
+        if wev.direction == SDL3.SDL_MOUSEWHEEL_FLIPPED
             dx, dy = -dx, -dy
         end
         scroll_by!(scroll, dx, dy)
-    elseif ty == SDL_KEYDOWN
-        fiber = get(WINDOW_BY_ID, event.key.windowID, nothing)
+    elseif ty == SDL3.SDL_EVENT_KEY_DOWN
+        kev = SDL3.as_keyboard(event)
+        fiber = get(WINDOW_BY_ID, kev.windowID, nothing)
         fiber === nothing && return
         target = keyboard_target(fiber)
-        key = unsafe_string(SDL_GetKeyName(event.key.keysym.sym))
-        LAST_KEYMODS[] = event.key.keysym.mod
+        key = SDL3.GetKeyName(kev.key)
+        LAST_KEYMODS[] = kev.mod
         # Escape first dismisses open popup menus (before fields see it).
         if key == "Escape" && close_open_menus!(0)
             return
@@ -600,7 +611,7 @@ function dispatch_event!(event::SDL_Event)
             mf = target.props[:on_key_mods]
             if mf isa Function
                 try
-                    handled = mf(key, Int(event.key.keysym.mod))
+                    handled = mf(key, Int(kev.mod))
                 catch err
                     @warn "Rocks: callback :on_key_mods failed" exception =
                         (err, catch_backtrace())
@@ -611,23 +622,20 @@ function dispatch_event!(event::SDL_Event)
             handled === :handled && return
         end
         callback(target.props, :on_key, key)
-    elseif ty == SDL_KEYUP
-        fiber = get(WINDOW_BY_ID, event.key.windowID, nothing)
+    elseif ty == SDL3.SDL_EVENT_KEY_UP
+        kev = SDL3.as_keyboard(event)
+        fiber = get(WINDOW_BY_ID, kev.windowID, nothing)
         fiber === nothing && return
         target = keyboard_target(fiber)
-        key = unsafe_string(SDL_GetKeyName(event.key.keysym.sym))
+        key = SDL3.GetKeyName(kev.key)
         callback(target.props, :on_key_up, key)
-    elseif ty == SDL_TEXTINPUT
-        fiber = get(WINDOW_BY_ID, event.text.windowID, nothing)
+    elseif ty == SDL3.SDL_EVENT_TEXT_INPUT
+        tev = SDL3.as_text_input(event)
+        fiber = get(WINDOW_BY_ID, tev.windowID, nothing)
         fiber === nothing && return
-        # The text field is a fixed 32-byte UTF-8 buffer.
-        chars = UInt8[]
-        for b in event.text.text
-            b == 0 && break
-            push!(chars, UInt8(b & 0xff))
-        end
+        text = tev.text == C_NULL ? "" : unsafe_string(tev.text)
         target = keyboard_target(fiber)
-        callback(target.props, :on_text_input, String(chars))
+        callback(target.props, :on_text_input, text)
     end
     return nothing
 end
@@ -660,7 +668,7 @@ function handle_close!(wid)
     # Hide the window; the fiber stays mounted. It becomes visible again only
     # when the component rendering it remounts (a fresh fiber is created).
     if fiber.host isa WindowState
-        SDL_HideWindow(fiber.host.ptr)
+        SDL3.HideWindow(fiber.host.ptr)
         fiber.hidden = true
     end
     return nothing

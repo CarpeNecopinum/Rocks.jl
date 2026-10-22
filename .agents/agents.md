@@ -4,8 +4,8 @@ kind: agents
 
 # Rocks.jl — Project Guidelines
 
-Rocks.jl is a React(Native)-style GUI framework in Julia built on SDL2
-(SimpleDirectMediaLayer.jl). Components are plain Julia functions; the
+Rocks.jl is a React(Native)-style GUI framework in Julia built on SDL3
+(through the SDL3.jl wrapper in `../SDL3.jl`). Components are plain Julia functions; the
 `@rock` macro plays the role of React's `createElement` — it applies to a
 *call* to the kind (`@rock Text("hi")`), children as positional arguments,
 props as keyword arguments; state is created with the `@use` macro as a
@@ -25,7 +25,7 @@ src/
 ├── hooks.jl       # @use (Ref/Observable state), useEffect/useMemo/..., timers
 ├── fiber.jl       # Fiber struct + reconciler (headless-testable)
 ├── layout.jl      # measure/place passes (headless-testable)
-├── backend.jl     # SDL2 backend: windows, textures, fonts, colors, drawing
+├── backend.jl     # SDL3 backend: windows, textures, fonts, colors, drawing
 ├── events.jl      # SDL event routing, hit testing, press/hover/focus tracking
 ├── runtime.jl     # main loop, render entry point, quit!
 ├── components.jl  # Row/Column convenience components
@@ -47,12 +47,12 @@ timer — an idle application draws nothing.
 
 ## Build & Test
 
-- Tests (headless, uses `SDL_VIDEODRIVER=dummy`; includes pixel-verified
+- Tests (headless, uses `SDL_VIDEO_DRIVER=dummy`; includes pixel-verified
   screenshot tests): `julia --project=. -e 'using Pkg; Pkg.test()'`
 - Run an example (needs a display):
   `julia --project=. examples/counter.jl`
 - Run an example headlessly with a captured screenshot:
-  `SDL_VIDEODRIVER=dummy julia --project=. examples/screenshot.jl`
+  `SDL_VIDEO_DRIVER=dummy julia --project=. examples/screenshot.jl`
 - Material 3 showcase (light/dark toggle):
   `julia --project=. examples/material3.jl`
 - After dependency changes: `julia --project=. -e 'using Pkg; Pkg.resolve()'`

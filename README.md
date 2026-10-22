@@ -1,7 +1,7 @@
 # Rocks.jl
 
-A React(Native)-style GUI framework for Julia, built on SDL2 (via
-[SimpleDirectMediaLayer.jl](https://github.com/JuliaMultimedia/SimpleDirectMediaLayer.jl)).
+A React(Native)-style GUI framework for Julia, built on SDL3 (via
+[SDL3.jl](https://github.com/CarpeNecopinum/SDL3.jl)).
 
 Components are plain Julia functions — there is no separate component
 language and no JSX-like sublanguage. The [`@rock`](@ref) macro plays the
@@ -33,13 +33,23 @@ render(Counter)
 
 ## Installation
 
+Rocks binds to the system SDL3 and SDL3_ttf shared libraries, so those have
+to be installed:
+
+```sh
+sudo apt install libsdl3-dev libsdl3-ttf-dev   # Debian/Ubuntu
+```
+
 ```julia
-pkg> add SimpleDirectMediaLayer   # SDL2 bindings (dependency of Rocks)
 pkg> dev /path/to/Rocks.jl        # Rocks is currently not registered
 ```
 
 On Linux you may need `ALSA_CONFIG_PATH=/usr/share/alsa/alsa.conf` in your
 environment (see [Yggdrasil#1432](https://github.com/JuliaPackaging/Yggdrasil/issues/1432)).
+
+The headless dummy video driver is selected with the `SDL_VIDEO_DRIVER`
+environment variable (`SDL_VIDEO_DRIVER=dummy`); SDL3_ttf can be pointed at a
+specific build with `SDL3_TTF_LIBRARY_PATH`.
 
 ## Concepts
 
@@ -186,6 +196,11 @@ keeps the window open; without `on_close`, clicking the X hides the window
 (or quits if it is the last visible one). `quit!()` closes all windows and
 makes `render` return.
 
+Rocks talks to SDL3 through the `SDL3` module.  SDL3 exports a `Window`
+*type* as well, so `using Rocks` and `using SDL3` in the same session makes
+the bare name `Window` ambiguous — qualify it (`Rocks.Window`) or import SDL3
+qualified (`import SDL3`).
+
 ### Built-in elements
 
 Akin to React Native, styling is left to the user. Rocks provides primitives:
@@ -236,9 +251,14 @@ Akin to React Native, styling is left to the user. Rocks provides primitives:
   `hover_background`, `pressed_background` for state-dependent styling.
   `cursor` picks the pointer shape while hovered — `:hand` (the default
   pressable) or `:text`, which shows the I-beam over editable text.
-* **`Image`** — a graphics file (PNG/JPG/BMP/... via SDL2_image). `src` is a
+* **`Image`** — a graphics file (PNG or BMP, the formats SDL3 loads
+  natively). `src` is a
   path or an URL (fetched with `Downloads` and cached); `width`/`height`
-  scale it (keeping the aspect ratio when only one is given).
+  scale it (keeping the aspect ratio when only one is given).  Fetching a URL
+  is the only network access Rocks ever makes, and it only happens for an
+  `Image` whose `src` is an `http(s)` URL — the host then sees the client's
+  address, as with any download.  Nothing else leaves the machine: there is
+  no telemetry, no update check and no phone-home of any kind.
 * **`Split`** — a resizable divider: the first two children are panes
   separated by a draggable handle. Props: `direction` (`:horizontal`/
   `:vertical`), `ratio` (an `Observable` — controlled by dragging — or a
@@ -358,7 +378,7 @@ See `examples/material3.jl` for a full tour with a live light/dark switch:
 
 ```shell
 julia --project examples/material3.jl
-SDL_VIDEODRIVER=dummy julia --project examples/material3.jl   # headless
+SDL_VIDEO_DRIVER=dummy julia --project examples/material3.jl   # headless
 ```
 
 ## Windows 7 / Winforms components
@@ -408,11 +428,15 @@ scrolls only the client area. `E.light_theme()` is the Aero-inspired default;
 `E.classic_theme()` and `E.high_contrast_theme()` are alternatives. Supply an
 `Observable{Theme}` to switch themes live.
 
-Menus open as **separate borderless OS popup windows** pinned at their anchor
-in screen coordinates, so a menu is never clipped by the edges of its owner
-window and always paints above every other window's content (including
-dialogues). Clicking anywhere outside the menu (or pressing Escape) closes it,
-and that first click is swallowed as the dismiss gesture. Menu titles and
+Menus open as **separate borderless OS popup windows**, created as child
+popups of the window they belong to.  They are anchored to the control that
+opened them (a menu title, the pointer in a text field) in that window's
+client area, so a menu always opens right below its title — no matter how
+the window manager draws the window frame — and it is never clipped by the
+edges of its owner window.  Menus always paint above every other window's
+content (including dialogues). Clicking anywhere outside the menu (or pressing
+Escape) closes it, and that first click is swallowed as the dismiss gesture.
+Menu titles and
 toolbar buttons stay flat under the pointer — the
 recessed plastic highlight appears only while an item is pressed or its menu
 is open. `MessageBox` opens as its **own OS window** (native title bar and
@@ -452,7 +476,7 @@ message box:
 
 ```shell
 julia --project examples/enterprise.jl
-SDL_VIDEODRIVER=dummy julia --project examples/enterprise.jl   # headless
+SDL_VIDEO_DRIVER=dummy julia --project examples/enterprise.jl   # headless
 ```
 
 ## Examples
@@ -480,7 +504,7 @@ components without rendering (the `render` call is guarded by
 captured) or a window fiber; the window is redrawn first, so the file
 reflects the current tree. The pixels come from the renderer's backbuffer,
 not the windowing system — so this works in normal windows *and* headlessly
-with `SDL_VIDEODRIVER=dummy`, whose software renderer writes real pixels:
+with `SDL_VIDEO_DRIVER=dummy`, whose software renderer writes real pixels:
 
 ```julia
 root = render(App; frames = 3, screenshot = "app.png")  # bounded + captured
@@ -494,7 +518,7 @@ headless runs — no window is ever shown, but the capture still contains real
 pixels:
 
 ```shell
-SDL_VIDEODRIVER=dummy julia --project examples/screenshot.jl
+SDL_VIDEO_DRIVER=dummy julia --project examples/screenshot.jl
 ```
 
 The test suite uses this to pixel-verify captured screenshots without any
@@ -509,6 +533,10 @@ verification all run against the dummy driver's software renderer:
 ```shell
 julia --project -e 'using Pkg; Pkg.test()'
 ```
+
+The suite renders text, so **SDL3_ttf is required**: when the library is
+missing, the run fails with a hint (install `libsdl3-ttf-dev` or set
+`SDL3_TTF_LIBRARY_PATH`) instead of skipping the text tests.
 
 ## Roadmap
 
