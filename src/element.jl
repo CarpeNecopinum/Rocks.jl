@@ -252,6 +252,17 @@ props_dict(args...; kwargs...) = begin
 end
 
 """
+    FLEX_PROPS
+
+The props that size a component inside its parent.  They belong to the
+component itself — the box around it lays it out with them — so they are not
+passed on to the component function: every component can be sized by the flexbox
+model without having to declare the props.
+"""
+const FLEX_PROPS = (:flex, :flex_grow, :flex_shrink, :flex_basis, :align_self,
+                    :margin, :min_width, :max_width, :min_height, :max_height)
+
+"""
     @rock Kind(children...; props...)
     @rock Kind()
 

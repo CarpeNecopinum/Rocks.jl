@@ -1038,6 +1038,37 @@ function draw_scrolled!(fiber, renderer)
     return nothing
 end
 
+# Draw the children of a fiber with a clip rectangle applied: they are
+# clipped to the content box of the fiber, so nothing can be drawn outside of
+# it.  The previous clip is restored afterwards, so nested clips compose.
+function draw_clipped!(fiber, renderer)
+    previous = get(RENDER_CLIP, renderer, nothing)
+    x, y, w, h = fiber.rect
+    px, py = padding_of(fiber)
+    clip = SDL3.Rect(round(Int, x + px), round(Int, y + py),
+                     round(Int, max(w - 2px, 0)), round(Int, max(h - 2py, 0)))
+    previous === nothing || (clip = clip_rect(previous, clip))
+    if clip.w <= 0 || clip.h <= 0
+        return nothing
+    end
+    SDL3.SetRenderClipRect(renderer, clip)
+    RENDER_CLIP[renderer] = clip
+    try
+        for child in fiber.children
+            draw!(child, renderer)
+        end
+    finally
+        if previous === nothing
+            SDL3.SetRenderClipRect(renderer, nothing)
+            delete!(RENDER_CLIP, renderer)
+        else
+            SDL3.SetRenderClipRect(renderer, previous)
+            RENDER_CLIP[renderer] = previous
+        end
+    end
+    return nothing
+end
+
 # Optional scrollbar of a scroll container, drawn after (and outside) the
 # clipped content so the thumb stays crisp at the viewport edge.
 function draw_scrollbar!(fiber, renderer)
@@ -1115,6 +1146,10 @@ function draw!(fiber, renderer)
     end
     if is_scrollable(fiber)
         draw_scrolled!(fiber, renderer)
+    elseif overflow_hidden(fiber)
+        # `overflow = :hidden` keeps the children inside the box: a control
+        # cannot draw outside of the space it was given.
+        draw_clipped!(fiber, renderer)
     else
         for child in fiber.children
             draw!(child, renderer)

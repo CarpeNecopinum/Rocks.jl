@@ -381,6 +381,9 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
             end,
             :disabled => disabled,
             :cursor => :text,
+            # The text is clipped to the field, so a long text does not run
+            # over the border when the field is squeezed.
+            :overflow => :hidden,
             :background => t.colors.input,
             :hover_background => t.colors.input,
             :border_color => focused ? t.colors.focus : t.colors.input_border,
@@ -500,7 +503,12 @@ function GroupBox(; title = "", children = Any[], caption_background = nothing,
                        :fill => fill)
     width !== nothing && (props[:width] = width)
     height !== nothing && (props[:height] = height)
-    return Element(_BOX, props, Any[caption, children...])
+    # The content is clipped to the frame, so a control that is wider than the
+    # group cannot run out of it.  The caption sits in the notch of the top
+    # border, outside the frame, so it stays a sibling of the content.
+    content = @rock Box(children...;
+                        direction = :column, gap = 6, overflow = :hidden)
+    return Element(_BOX, props, Any[caption, content])
 end
 
 """
@@ -520,6 +528,10 @@ function Panel(; children = Any[], padding = 8, background = nothing,
         :border_color => border_color,
         :border_width => border_width,
         :bevel => bevel, :fill => fill,
+        # The content stays inside the panel: a text that is wider than the
+        # panel (a pane of a split, for example) is clipped instead of
+        # running over the border.
+        :overflow => :hidden,
     )
     width !== nothing && (props[:width] = width)
     height !== nothing && (props[:height] = height)
@@ -540,18 +552,20 @@ function ProgressBar(; value, width = 200, height = 17)
     t = theme()
     value = @use value
     frac = clamp(Float64(value[]), 0.0, 1.0)
-    inner_w = max(width - 4, 0)
     return Element(
         _BOX,
         props_dict(:width => width, :height => height,
                    :background => t.colors.progress_track,
                    :border_color => t.colors.progress_border,
                    :border_width => 1, :bevel => :sunken,
-                   :radius => 2, :direction => :row),
+                   :radius => 2, :direction => :row,
+                   # The fill is a share of the bar, so it follows the bar when
+                   # the bar is squeezed by a smaller window.
+                   :padding => 2),
         Any[
             @rock Box(;
-                position = :absolute, x = 2, y = 2,
-                width = inner_w * frac, height = max(height - 4, 1),
+                width = "$(round(frac * 100, digits = 4))%",
+                height = "100%",
                 radius = 1, background = t.gradients.progress)
         ],
     )
@@ -575,6 +589,8 @@ function SplitContainer(; children = Any[], direction = :horizontal,
                    :handle_bevel => :raised,
                    :bevel_light => t.colors.border_light,
                    :bevel_dark => t.colors.border_dark,
+                   # The panes cannot paint outside of the split.
+                   :overflow => :hidden,
                    :width => width, :height => height),
         flat_children(children),
     )

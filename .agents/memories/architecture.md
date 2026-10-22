@@ -36,6 +36,25 @@ Key architecture decisions of Rocks.jl (React-style GUI framework on SDL3):
   is where a child that hits its `max_width` leaves the space to the others.
   `align` defaults to `:start` (React Native defaults to `:stretch`) so the
   existing look is kept.
+- **Nothing falls out of the window**: a flow child's width is clipped to the
+  content box of its parent (the cross axis of a column), so shrinking the
+  window shrinks the controls in it.  Along the main axis the children shrink
+  when they carry `flex_shrink`; taller content is left alone and scrolls.
+- **Painting can be clipped**: `overflow = :hidden` on a box clips its
+  children to its content box (the draw pass sets a renderer clip rect,
+  `draw_clipped!` in backend.jl).  The text field, the combo box and the
+  panel use it so their text never runs over the border; the group box clips
+  its content to the frame (the caption in the notch is a sibling of the
+  content, so it stays outside the clip) and the split container clips its
+  panes.  Note that a *clipped* text is cut mid-glyph: the layout clips the
+  text's box, but the glyphs are still painted at their natural width.
+- **Components are sized by their parent, not by their own props**: the
+  flexbox props (`flex`, `max_width`, …) live on the *component fiber*, so
+  the box around a component lays it out with them.  The reconciler
+  (`perform_render!` in fiber.jl) therefore does not pass them on to the
+  component function — every component, including user written ones, can be
+  sized by flexbox without declaring the props.  The element a component
+  returns fills the space the component was given.
 - **Windows are components**: any `Window` element anywhere in the tree is
   hoisted into its own SDL window (multi-window apps and dialogs are
   conditional rendering).

@@ -461,6 +461,12 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
     end
 
     @testset "flexbox layout" begin
+        # A component that renders a box, used to check that the flexbox
+        # props size the component itself.
+        function Card(; label = "card")
+            @rock Box(@rock Text(label); background = "#eef2f7", padding = 8)
+        end
+
         # `flex` is the React Native shorthand: `flex = 1` means grow 1,
         # shrink 1 and a basis of 0, so the child takes the free space of
         # its parent.
@@ -653,6 +659,44 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             @test a.rect[2] == 0
             @test b.rect[2] == 0
             @test c.rect[2] == 20
+        end
+
+        # A component is sized by the box around it: the flexbox props belong
+        # to the component, so any component can be laid out by flexbox.
+        function CardApp()
+            @rock Window(
+                @rock Column(
+                    @rock Card(; label = "fixed"),
+                    @rock Card(; label = "grows"; flex = 1);
+                    width = 200, height = 120, gap = 0, align = :stretch);
+                title = "component", width = 240, height = 160)
+        end
+        with_tree(CardApp) do root
+            w = sync_windows!(root)[1]
+            col = w.children[1].children[1]
+            fixed, grows = col.children
+            # The card is as tall as its text plus the padding.
+            @test fixed.rect[4] == 35
+            # The flexible card takes the rest of the column.
+            @test grows.rect[4] == 85
+            @test grows.rect[3] == 200
+            # The element the component returns fills the space it was given.
+            @test only(grows.children).rect == grows.rect
+        end
+
+        # A child never falls out of its container: a control with a fixed
+        # width is clipped to the content box when the window gets narrower.
+        function SqueezeApp()
+            @rock Window(
+                @rock Column(
+                    @rock Box(; width = 200, height = 20);
+                    width = 120, height = 60);
+                title = "squeeze", width = 160, height = 100)
+        end
+        with_tree(SqueezeApp) do root
+            w = sync_windows!(root)[1]
+            col = w.children[1].children[1]
+            @test col.children[1].rect[3] == 120
         end
     end
 
@@ -1752,7 +1796,10 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                        if get(b.props, :background, nothing) ==
                           E.light_theme().colors.progress_track &&
                           get(b.props, :bevel, nothing) === :sunken][1]
-                @test bar.children[1].props[:width] == 48
+                # The fill is a share of the bar, so it follows the bar when
+                # the bar is squeezed.
+                @test bar.children[1].props[:width] == "50.0%"
+                @test bar.children[1].props[:height] == "100%"
 
                 pressable_with(root, "B").props[:on_press]()
                 @test tab[] == 2
@@ -2468,6 +2515,33 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             @test_throws ErrorException Rocks.screenshot(App(), path)
             @test_throws ErrorException Rocks.screenshot(
                 Rocks.create_root(() -> nothing, NamedTuple()), path)
+        end
+
+        @testset "clipping" begin
+            # `overflow = :hidden` keeps the content of a box inside it: a
+            # text that is wider than the box is clipped instead of running
+            # over its border.
+            RED = (0.9, 0.2, 0.2)
+            function ClipApp()
+                @rock Window(
+                    @rock Box(
+                        @rock Text("a long text that does not fit";
+                                   color = (1.0, 1.0, 1.0));
+                        background = RED, width = 60, height = 40,
+                        overflow = :hidden);
+                    title = "clip", width = 200, height = 120)
+            end
+            with_tree(ClipApp) do root
+                windows = sync_windows!(root)
+                path = joinpath(mktempdir(), "clip.png")
+                @test Rocks.screenshot(windows[1], path) == path
+                white(x, y) = png_pixel(path, x, y) == (0xff, 0xff, 0xff, 0xff)
+                whites(xs) = sum(x -> sum(y -> white(x, y) ? 1 : 0, 1:39), xs)
+                # The text is painted inside the box ...
+                @test whites(1:59) > 0
+                # ... and clipped away right of it.
+                @test whites(61:190) == 0
+            end
         end
 
         # render with bounded frames + capture — the headless workflow.

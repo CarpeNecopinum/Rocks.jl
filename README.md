@@ -340,6 +340,7 @@ have a **flex basis** and may grow or shrink into the space that is left.
 | `width = "50%"` | a percentage of the parent's content box (`height` likewise) |
 | `margin = 8` | space around a child (a number or a `(horizontal, vertical)` pair) |
 | `min_width` / `max_width` | bounds for the flexed size (likewise `min_height` / `max_height`) |
+| `overflow = :hidden` | clip the content to the box: a text field whose text is wider than the field clips the text instead of letting it run over the border |
 
 ```julia
 @rock Column(
@@ -352,6 +353,24 @@ have a **flex basis** and may grow or shrink into the space that is left.
 A child that hits its `min_*`/`max_*` bound leaves the space to the others,
 exactly as in React Native. `examples/flexbox.jl` shows the whole model in
 one window.
+
+A child never sticks out of its window sideways: its width is clipped to the
+content box, so shrinking the window shrinks the controls in it instead of
+letting them fall out. Along the main axis the children shrink when they have
+`flex_shrink` (a text field in a row, for example), and the rest is clipped
+by the scroll view.
+
+Content that is *painted* — the text of a field, the entry of a combo box —
+is clipped to its box with `overflow = :hidden`; the text field, the combo box
+and the panel do that by default.  The group box clips its content to the
+frame (the caption in the notch stays outside), and the split container clips
+its panes.
+
+The props work on **components** as well, and they do not have to be declared
+by the component: they size the component inside its parent, so
+`@rock MyCard(; flex = 1)` grows the card in the box around it, and
+`@rock E.ProgressBar(value = v; max_width = 420)` keeps the bar at its
+designed width inside a growing column.
 
 Two differences to React Native are worth knowing: the **`align` default is
 `:start`**, not `:stretch` (so existing layouts keep their look — pass

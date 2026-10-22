@@ -140,7 +140,7 @@ function ListView(; items = Any[], selected, on_select = (i) -> nothing,
             background = on ? t.colors.selection : nothing,
             hover_background = on ? t.colors.selection : t.colors.hot,
             pressed_background = on ? t.colors.selection : t.colors.hot_border,
-            width = width, height = t.metrics.row_height,
+            height = t.metrics.row_height,
             padding_x = 3, padding_y = 0,
             direction = :row, align = :center, gap = 2, fill = true))
     end
@@ -320,11 +320,17 @@ function ComboBox(; items = Any[], selected, on_change = () -> nothing,
         (@rock Box(
             text_element(value; color = t.colors.text,
                          size = t.metrics.font_size, font = t.font);
-            position = :absolute, x = 5, y = 4)),
+            position = :absolute, x = 5, y = 4,
+            # The entry is clipped before the drop button, so a long entry
+            # does not run under it.
+            width = max(width - 23, 0), overflow = :hidden)),
         drop;
         on_press = () -> open[] = !open[],
         background = t.colors.input,
         hover_background = t.colors.input,
+        # The text is clipped to the field, so a long entry does not run over
+        # the border when the field is squeezed.
+        overflow = :hidden,
         border_color = open[] ? t.colors.focus : t.colors.input_border,
         border_width = 1, bevel = :sunken,
         bevel_light = t.colors.border_light,

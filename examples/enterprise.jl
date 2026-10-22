@@ -6,6 +6,11 @@
 # The app is a mock system utility: menu bar, toolbar, tabbed pages with group
 # boxes and sunken inputs, list/grid views, progress and slider controls, a
 # status bar, a modal message box and a context menu.
+#
+# The pages are laid out with the flexbox model: the boxes of a page stretch
+# across the width of the page (`align = :stretch`), the controls that should
+# keep their designed size carry an upper bound (`max_width`), and the
+# elements that may grow say so with `flex`.
 
 using Rocks
 import Rocks.Enterprise
@@ -72,143 +77,163 @@ const RECENT_ITEMS = [
     ("settings.ini", "file"),
 ]
 
+# A label with its control, the way a form is written.
 function Labeled(; label, control)
-    label_box = @rock Box(@rock E.Label(label); width = 130)
-    return @rock Row(label_box, control; gap = 8, align = :center)
+    @rock Row(
+        @rock Box(@rock E.Label(label); width = 130),
+        control;
+        gap = 8, align = :center)
 end
 
 function GeneralPage(; fill = false)
-    t = theme[]
-    name_field = @rock E.TextBox(text = name, width = 240)
-    org_field = @rock E.TextBox(text = organization, width = 240)
-    dept_combo = @rock E.ComboBox(items = DEPARTMENTS, selected = department,
-                                  width = 240)
-    system = @rock E.GroupBox(
-        (@rock Labeled(; label = "Name:", control = name_field)),
-        (@rock Labeled(; label = "Organization:", control = org_field)),
-        (@rock Labeled(; label = "Department:", control = dept_combo));
-        title = "System", fill = true)
+    @rock Column(
+        @rock E.GroupBox(
+            @rock Labeled(; label = "Name:",
+                          control = @rock E.TextBox(text = name, width = 240,
+                                                   flex_shrink = 1)),
+            @rock Labeled(; label = "Organization:",
+                          control = @rock E.TextBox(text = organization, width = 240,
+                                                   flex_shrink = 1)),
+            @rock Labeled(; label = "Department:",
+                          control = @rock E.ComboBox(items = DEPARTMENTS,
+                                                    selected = department,
+                                                    width = 240,
+                                                    flex_shrink = 1));
+            title = "System"),
 
-    splash = @rock E.CheckBox(checked = check_splash,
-                              label = "Show splash screen at startup")
-    updates = @rock E.CheckBox(checked = check_updates,
-                               label = "Check for updates automatically")
-    telemetry = @rock E.CheckBox(checked = check_telemetry,
-                                 label = "Send anonymous usage statistics")
-    settings = @rock E.GroupBox(splash, updates, telemetry;
-        title = "Settings", fill = true)
+        @rock E.GroupBox(
+            @rock E.CheckBox(checked = check_splash,
+                             label = "Show splash screen at startup"),
+            @rock E.CheckBox(checked = check_updates,
+                             label = "Check for updates automatically"),
+            @rock E.CheckBox(checked = check_telemetry,
+                             label = "Send anonymous usage statistics");
+            title = "Settings"),
 
-    small = @rock E.RadioButton(selected = radio_scale, value = 1,
-                                label = "Small (100%)")
-    medium = @rock E.RadioButton(selected = radio_scale, value = 2,
-                                 label = "Medium (125%)")
-    large = @rock E.RadioButton(selected = radio_scale, value = 3,
-                                label = "Large (150%)")
-    radio_row = @rock Row(small, medium, large; gap = 16, align = :center)
-    scaling = @rock E.GroupBox(radio_row;
-        title = "Display scaling",
-        fill = true)
+        @rock E.GroupBox(
+            @rock Row(
+                @rock E.RadioButton(selected = radio_scale, value = 1,
+                                   label = "Small (100%)"),
+                @rock E.RadioButton(selected = radio_scale, value = 2,
+                                   label = "Medium (125%)"),
+                @rock E.RadioButton(selected = radio_scale, value = 3,
+                                   label = "Large (150%)");
+                gap = 16, align = :center);
+            title = "Display scaling"),
 
-    progress_bar = @rock E.ProgressBar(value = progress, width = 420)
-    volume_slider = @rock E.Slider(value = volume, width = 420, ticks = 10)
-    progress_label = @rock E.Label("Background task progress")
-    volume_label = @rock E.Label("Volume")
-    progress_group = @rock E.GroupBox(
-        progress_label, progress_bar, volume_label, volume_slider;
-        title = "Status", fill = true)
+        @rock E.GroupBox(
+            @rock E.Label("Background task progress"),
+            # The bar and the slider keep the width they were designed for.
+            @rock E.ProgressBar(value = progress, width = 420, max_width = 420),
+            @rock E.Label("Volume"),
+            @rock E.Slider(value = volume, width = 420, ticks = 10,
+                           max_width = 420);
+            title = "Status"),
 
-    apply = @rock E.Button("Apply"; on_press = () -> status_text[] = "Settings applied")
-    cancel = @rock E.Button("Cancel")
-    ok = @rock E.Button("OK"; default = true,
-                        on_press = () -> status_text[] = "Changes accepted")
-    button_row = @rock Row(apply, cancel, ok; gap = 6, align = :center,
-                           justify = :end, fill = true)
+        @rock E.GroupBox(
+            @rock E.ListView(items = RECENT_ITEMS, selected = recent_selected,
+                             icons = true, width = 1040, height = 170,
+                             max_width = 1040, max_height = 170);
+            title = "Recent items"),
 
-    recent = @rock E.ListView(items = RECENT_ITEMS, selected = recent_selected,
-                              icons = true, width = 1040, height = 170)
-    recent_group = @rock E.GroupBox(recent;
-        title = "Recent items", fill = true)
+        @rock E.GroupBox(
+            @rock E.Label("Last check: today at 09:42"),
+            @rock E.Label("Version: 7.4.1 (build 2026.10)"),
+            @rock E.Label("No maintenance tasks are currently scheduled.");
+            title = "Maintenance"),
 
-    last_check = @rock E.Label("Last check: today at 09:42")
-    version = @rock E.Label("Version: 7.4.1 (build 2026.10)")
-    maintenance_note = @rock E.Label("No maintenance tasks are currently scheduled.")
-    maintenance = @rock E.GroupBox(last_check, version, maintenance_note;
-        title = "Maintenance", fill = true)
+        # Reserve transparent space below the combo box so its popup is not
+        # covered by later siblings. `pointer_events = :none` keeps the popup
+        # hittable.
+        @rock Box(; height = 90, pointer_events = :none),
 
-    # Reserve transparent space below the combo box so its popup is not covered
-    # by later siblings. `pointer_events = :none` keeps the popup hittable.
-    combo_space = @rock Box(; height = 90, pointer_events = :none)
-    return @rock Column(settings, scaling, progress_group, system, combo_space,
-                        recent_group, maintenance, button_row;
-                        gap = 12, fill = fill)
+        @rock Row(
+            @rock E.Button("Apply";
+                           on_press = () -> status_text[] = "Settings applied",
+                           max_width = 120),
+            @rock E.Button("Cancel", max_width = 120),
+            @rock E.Button("OK"; default = true,
+                           on_press = () -> status_text[] = "Changes accepted",
+                           max_width = 120);
+            gap = 6, align = :center, justify = :end);
+        # The page is as wide as the viewport and its boxes stretch with it.
+        gap = 12, fill = fill, align = :stretch)
 end
 
 function FilesPage(; fill = false)
-    t = theme[]
-    list = @rock E.ListView(items = FILE_ITEMS, selected = list_selected,
-                            icons = true, width = 440, height = 300)
-    grid = @rock E.GridView(columns = GRID_COLUMNS, rows = GRID_ROWS,
-                            selected = grid_selected, width = 585, height = 300,
-                            fill = true)
-    browser = @rock E.Row(list, grid; gap = 12, align = :start)
-    files = @rock E.GroupBox(browser;
-        title = "Files and folders",
-        fill = true)
-    refresh = @rock E.Button("Refresh"; icon = "refresh",
-        on_press = () -> status_text[] = "File list refreshed")
-    details = @rock E.Button("Details")
-    toolbar_row = @rock Row(refresh, details; gap = 6, align = :center)
-    return @rock Column(files, toolbar_row; gap = 12, fill = fill)
+    @rock Column(
+        @rock E.GroupBox(
+            @rock Row(
+                @rock E.ListView(items = FILE_ITEMS, selected = list_selected,
+                                 icons = true, width = 440, height = 300,
+                                 max_width = 440, max_height = 300,
+                                 flex_shrink = 1),
+                @rock E.GridView(columns = GRID_COLUMNS, rows = GRID_ROWS,
+                                 selected = grid_selected, width = 585,
+                                 height = 300, max_width = 585, max_height = 300,
+                                 flex_shrink = 1, fill = true);
+                gap = 12, align = :start);
+            title = "Files and folders"),
+
+        @rock Row(
+            @rock E.Button("Refresh"; icon = "refresh",
+                           on_press = () -> status_text[] = "File list refreshed",
+                           max_width = 140),
+            @rock E.Button("Details", max_width = 140);
+            gap = 6, align = :center);
+        gap = 12, fill = fill, align = :stretch)
 end
 
 function ControlsPage(; fill = false)
-    t = theme[]
-    normal = @rock E.Button("Normal")
-    default = @rock E.Button("Default"; default = true)
-    disabled = @rock E.Button("Disabled"; disabled = true)
-    icon = @rock E.Button("Open"; icon = "open")
-    buttons = @rock E.GroupBox(
-        (@rock Row(normal, default, disabled, icon; gap = 6, align = :center));
-        title = "Buttons", fill = true)
+    @rock Column(
+        @rock E.GroupBox(
+            @rock Row(
+                @rock E.Button("Normal", max_width = 120),
+                @rock E.Button("Default"; default = true, max_width = 120),
+                @rock E.Button("Disabled"; disabled = true, max_width = 120),
+                @rock E.Button("Open"; icon = "open", max_width = 120);
+                gap = 6, align = :center);
+            title = "Buttons"),
 
-    tip_source = @rock E.Button("Hover for tooltip")
-    tip = @rock E.ToolTip(tip_source; text = "A classic Win7 tooltip")
-    link = @rock E.LinkLabel("Open documentation";
-        on_press = () -> status_text[] = "Documentation link clicked")
-    context = @rock E.Button("Show context menu"; on_press = () -> begin
-        context_open[] = true
-        status_text[] = "Context menu opened"
-    end)
-    dialog = @rock E.Button("Show message box"; on_press = () -> message_open[] = true)
-    misc = @rock E.GroupBox(
-        (@rock Row(tip, link, context, dialog; gap = 8, align = :center));
-        title = "Menus and dialogs",
-        fill = true)
+        @rock E.GroupBox(
+            @rock Row(
+                @rock E.ToolTip(@rock E.Button("Hover for tooltip");
+                                text = "A classic Win7 tooltip"),
+                @rock E.LinkLabel("Open documentation";
+                    on_press = () -> status_text[] = "Documentation link clicked"),
+                @rock E.Button("Show context menu"; on_press = () -> begin
+                    context_open[] = true
+                    status_text[] = "Context menu opened"
+                end, max_width = 180),
+                @rock E.Button("Show message box";
+                               on_press = () -> message_open[] = true,
+                               max_width = 180);
+                gap = 8, align = :center);
+            title = "Menus and dialogs"),
 
-    left = @rock E.Panel(@rock E.Label("Left pane"); background = t.colors.document,
-                         border_color = t.colors.border, border_width = 1,
-                         padding = 8, fill = true)
-    right = @rock E.Panel(@rock E.Label("Right pane"); background = t.colors.document,
-                          border_color = t.colors.border, border_width = 1,
-                          padding = 8, fill = true)
-    split = @rock E.SplitContainer(left, right; width = 1040, height = 170,
-                                   ratio = 0.42)
-    split_group = @rock E.GroupBox(split;
-        title = "Split container",
-        fill = true)
+        @rock E.GroupBox(
+            @rock E.SplitContainer(
+                @rock E.Panel(@rock E.Label("Left pane");
+                              background = E.light_theme().colors.document,
+                              border_color = E.light_theme().colors.border,
+                              border_width = 1, padding = 8, fill = true),
+                @rock E.Panel(@rock E.Label("Right pane");
+                              background = E.light_theme().colors.document,
+                              border_color = E.light_theme().colors.border,
+                              border_width = 1, padding = 8, fill = true);
+                width = 1040, height = 170, max_width = 1040, max_height = 170,
+                ratio = 0.42);
+            title = "Split container");
 
-    menu_items = [E.MenuItem(label = "Cut", shortcut = "Ctrl+X"),
-                  E.MenuItem(label = "Copy", shortcut = "Ctrl+C"),
-                  E.MenuSeparator(),
-                  E.MenuItem(label = "Properties")]
-    ctx = @rock E.ContextMenu(open = context_open, x = 60, y = 50,
-                              items = menu_items)
-    page = @rock Column(buttons, misc, split_group; gap = 12, fill = fill)
-    return @rock Box(page, ctx; direction = :column, fill = fill)
+        @rock E.ContextMenu(open = context_open, x = 60, y = 50,
+            items = [E.MenuItem(label = "Cut", shortcut = "Ctrl+X"),
+                     E.MenuItem(label = "Copy", shortcut = "Ctrl+C"),
+                     E.MenuSeparator(),
+                     E.MenuItem(label = "Properties")]);
+        gap = 12, fill = fill, align = :stretch)
 end
 
 function App()
-    t = theme[]
     status_obs = @use status_text
     status = status_obs[]
     menus = [
@@ -243,41 +268,41 @@ function App()
                        on_press = () -> message_open[] = true),
         ]),
     ]
+
+    # The menu, the toolbar, the status bar and the dialog are passed to the
+    # form as props, so they stay in variables (a `@rock` element cannot be
+    # inlined into a prop value).
     menu = @rock E.MenuBar(menus = menus)
-
-    back = @rock E.ToolButton(icon = "arrow_back", tooltip = "Back")
-    forward = @rock E.ToolButton(icon = "arrow_forward", tooltip = "Forward")
-    up = @rock E.ToolButton(icon = "arrow_up", tooltip = "Up")
-    open = @rock E.ToolButton(icon = "open", label = "Open")
-    save = @rock E.ToolButton(icon = "save", label = "Save")
-    refresh = @rock E.ToolButton(icon = "refresh", label = "Refresh",
-                                 on_press = () -> status_text[] = "Refreshed")
-    help = @rock E.ToolButton(icon = "help", label = "Help")
-    toolbar = @rock E.ToolBar(back, forward, up,
-        (@rock E.ToolSeparator()),
-        open, save, refresh,
-        (@rock E.ToolSeparator()),
-        help)
-
-    pages = [(@rock GeneralPage(fill = true)), (@rock FilesPage(fill = true)),
-             (@rock ControlsPage(fill = true))]
-    tabs = @rock E.TabControl(tabs = ["General", "Files", "Controls"],
-                              selected = tab, children = pages, fill = true)
-
+    toolbar = @rock E.ToolBar(
+        @rock E.ToolButton(icon = "arrow_back", tooltip = "Back"),
+        @rock E.ToolButton(icon = "arrow_forward", tooltip = "Forward"),
+        @rock E.ToolButton(icon = "arrow_up", tooltip = "Up"),
+        @rock E.ToolSeparator(),
+        @rock E.ToolButton(icon = "open", label = "Open"),
+        @rock E.ToolButton(icon = "save", label = "Save"),
+        @rock E.ToolButton(icon = "refresh", label = "Refresh",
+                           on_press = () -> status_text[] = "Refreshed"),
+        @rock E.ToolSeparator(),
+        @rock E.ToolButton(icon = "help", label = "Help"))
     statusbar = @rock E.StatusBar(panels = [
         E.StatusPanel(text = status, width = 420),
         E.StatusPanel(text = "3 objects", width = 110),
         E.StatusPanel(text = "Local disk (C:)", width = 150),
     ])
-
-    dialog = @rock E.MessageBox(open = message_open, title = "About this app",
+    dialog = @rock E.MessageBox(open = message_open,
+        title = "About this app",
         message = "Rocks.Enterprise\nWindows 7 / Winforms component showcase.\n\nAll controls are native Rocks elements.",
         icon = :info, buttons = :okcancel, result = message_result,
         on_result = r -> status_text[] = "Message box: $r")
 
-    return @rock E.ThemeContext.provider(
+    @rock E.ThemeContext.provider(
         @rock E.Form(
-            tabs;
+            @rock E.TabControl(tabs = ["General", "Files", "Controls"],
+                                selected = tab,
+                                children = [@rock GeneralPage(fill = true),
+                                            @rock FilesPage(fill = true),
+                                            @rock ControlsPage(fill = true)],
+                                fill = true);
             menu = menu,
             toolbar = toolbar,
             status = statusbar,

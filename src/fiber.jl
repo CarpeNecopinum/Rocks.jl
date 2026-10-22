@@ -118,6 +118,11 @@ function perform_render!(fiber)
         # argument; it is only passed when non-empty so child-less components
         # need not declare it.
         kw = filter(p -> !(p.first === :children && isempty(p.second)), pairs(fiber.props))
+        # The flexbox props size the component inside its parent: the parent
+        # lays it out with them, so they are not passed on to the component
+        # function.  That way every component — the built-in ones and your own
+        # — can be sized by the box around it.
+        kw = [p for p in kw if !(p.first in FLEX_PROPS)]
         out = try
             fiber.kind(; kw...)
         finally

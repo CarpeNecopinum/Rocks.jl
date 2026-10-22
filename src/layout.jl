@@ -88,6 +88,16 @@ end
 
 is_absolute_child(fiber) = Symbol(get(fiber.props, :position, :relative)) === _ABSOLUTE
 
+"""
+    overflow_hidden(fiber) -> Bool
+
+Whether the children of a fiber are clipped to its content box.  Set
+`overflow = :hidden` on a box to keep its content inside it: a text field
+whose text is wider than the field then clips the text instead of letting it
+run over the border.
+"""
+overflow_hidden(fiber) = Symbol(get(fiber.props, :overflow, :visible)) === :hidden
+
 "Children that participate in flow layout (absolute ones are skipped)."
 flow_children(fiber) = (c for c in fiber.children if !is_absolute_child(c))
 
@@ -501,15 +511,26 @@ function place!(fiber, x, y)
         end
     else
         # Component fibers lay their output out like a gap-less column, with
-        # the same flex rules as a box. A `fill` child stretches to the
-        # component's (possibly constrained) width, so a component that
-        # returns a host box can fill the space its parent allocated (e.g. a
-        # pinned TopAppBar component).
+        # the same flex rules as a box.  The element a component returns takes
+        # the size the parent gave the component, so a component that is
+        # sized by flexbox (or stretched across the cross axis) fills the
+        # space it was given.
         dir = Symbol(get(fiber.props, :direction, :column))
         gap = float(get(fiber.props, :gap, 0))
         p = padding_of(fiber)
         align = Symbol(get(fiber.props, :align, :start))
         justify = Symbol(get(fiber.props, :justify, :start))
+        for child in flow_children(fiber)
+            if get(child.props, :fill, false) ||
+               Symbol(get(child.props, :position, :relative)) === _ABSOLUTE
+                fw = fixed_length(child, :width)
+                fh = fixed_length(child, :height)
+                child.measured = (fw === nothing ? w : fw,
+                                  fh === nothing ? h : fh)
+            else
+                child.measured = (w, h)
+            end
+        end
         place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h)
     end
     return
@@ -783,6 +804,11 @@ function place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h;
         lo, hi = cross_bounds(child, dir, inner_cross)
         lo !== nothing && (cross = max(cross, lo))
         hi !== nothing && (cross = min(cross, hi))
+        # A child never sticks out of its window sideways: the width is
+        # clipped to the content box, so shrinking a window shrinks the
+        # controls in it instead of letting them fall out.  (The height is
+        # left alone: content that is taller than its box scrolls.)
+        dir === :column && (cross = min(cross, inner_cross))
         push!(crosses, cross)
     end
 
