@@ -319,6 +319,45 @@ burns CPU.
 Pointer events are dispatched to the deepest fiber under the pointer,
 bubbling up to the nearest `Pressable` ancestor, like DOM event targets.
 
+## Flexbox layout
+
+The layout engine follows the [React Native](https://reactnative.dev/docs/flexbox)
+flexbox model, so interfaces can be laid out dynamically instead of with
+fixed pixel sizes. Every container has a **main axis** (the one its children
+flow along — `direction = :row` or `:column`) and a **cross axis**; children
+have a **flex basis** and may grow or shrink into the space that is left.
+
+| Prop | Meaning |
+| --- | --- |
+| `flex = 1` | the React Native shorthand: grow 1, shrink 1, basis 0 — the child takes the free space of its parent |
+| `flex_grow = 1` | share the free space of the parent, weighted by the factor |
+| `flex_shrink = 1` | shrink into a parent that is too small, weighted by factor × basis |
+| `flex_basis = 60` | the size before the free space is distributed (a number or a percentage) |
+| `justify = :center` | distribute along the **main** axis: `:start`, `:end`, `:center`, `:between`, `:around`, `:evenly` (React Native spellings like `:space-between` work too) |
+| `align = :stretch` | align across the **cross** axis: `:start`, `:end`, `:center`, `:stretch` (`:flex-start` works too) |
+| `align_self = :end` | the cross-axis alignment of a single child, overriding the container's `align` |
+| `flex_wrap = :wrap` | children that do not fit the main axis start a new line |
+| `width = "50%"` | a percentage of the parent's content box (`height` likewise) |
+| `margin = 8` | space around a child (a number or a `(horizontal, vertical)` pair) |
+| `min_width` / `max_width` | bounds for the flexed size (likewise `min_height` / `max_height`) |
+
+```julia
+@rock Column(
+    @rock Text("header"),
+    @rock Box(@rock Text("grows into the free space"); flex = 1),
+    @rock Text("footer");
+    flex = 1, fill = true, align = :stretch, gap = 8)
+```
+
+A child that hits its `min_*`/`max_*` bound leaves the space to the others,
+exactly as in React Native. `examples/flexbox.jl` shows the whole model in
+one window.
+
+Two differences to React Native are worth knowing: the **`align` default is
+`:start`**, not `:stretch` (so existing layouts keep their look — pass
+`align = :stretch` for the React Native behaviour), and `width`/`height` are
+plain pixels unless written as a percentage.
+
 ## Material Design 3
 
 `Rocks.Material3` is a submodule implementing much of the
@@ -484,7 +523,8 @@ SDL_VIDEO_DRIVER=dummy julia --project examples/enterprise.jl   # headless
 See [`examples/`](examples/): `counter.jl`, `clock.jl`, `multiwindow.jl`,
 `dialog.jl`, `widgets.jl` (a tour of the pre-styled widgets),
 `material3.jl` (the Material 3 component tour with a live light/dark switch),
-`enterprise.jl` (the Windows 7 / Winforms showcase), `image.jl`
+`enterprise.jl` (the Windows 7 / Winforms showcase), `flexbox.jl` (the
+React Native style flexbox layout), `image.jl`
 (the `Image` element with a generated gradient BMP) and `screenshot.jl`
 (bounded-frame rendering with a captured PNG).
 
@@ -543,8 +583,7 @@ missing, the run fails with a hint (install `libsdl3-ttf-dev` or set
 * Keyed list reconciliation (full reordering support; `key` currently guards
   index slots only)
 * Text wrapping, text input fields
-* Keyboard scrollbar paging and fractional layout (flexbox-style
-  growing/shrinking `flex` props)
+* Keyboard scrollbar paging
 * Custom drawing (canvas escape hatch), images
 * Window-level `on_focus`/`on_resize` callbacks
 

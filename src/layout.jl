@@ -91,6 +91,204 @@ is_absolute_child(fiber) = Symbol(get(fiber.props, :position, :relative)) === _A
 "Children that participate in flow layout (absolute ones are skipped)."
 flow_children(fiber) = (c for c in fiber.children if !is_absolute_child(c))
 
+# ---- flexbox ---------------------------------------------------------------
+#
+# The layout follows the React Native model: a container has a main axis
+# (the one its children flow along) and a cross axis, children have a flex
+# basis and may grow or shrink into the free space of the container, and
+# the container distributes the children along the main axis with `justify`
+# and across the cross axis with `align`.
+
+"The main-axis size of a (width, height) pair."
+main_size(dir, size) = dir === :row ? size[1] : size[2]
+
+"The cross-axis size of a (width, height) pair."
+cross_size(dir, size) = dir === :row ? size[2] : size[1]
+
+"""
+    resolve_length(value, base)
+
+Resolve a length prop: a number, a percentage of `base` (`"50%"`), or
+`nothing` when the prop is absent or not a length.
+"""
+function resolve_length(value, base)
+    value === nothing && return nothing
+    if value isa AbstractString
+        s = strip(value)
+        endswith(s, "%") || return nothing
+        pct = tryparse(Float64, s[1:end-1])
+        pct === nothing && return nothing
+        return pct / 100 * base
+    end
+    value isa Number || return nothing
+    return float(value)
+end
+
+"""
+    margin_of(fiber) -> (horizontal, vertical)
+
+The outer margin of a child: a scalar or a `(horizontal, vertical)` pair.
+"""
+function margin_of(fiber)
+    m = get(fiber.props, :margin, 0)
+    m isa Tuple && length(m) == 2 && return (float(m[1]), float(m[2]))
+    return (float(m), float(m))
+end
+
+"""
+    flex_factor(fiber) -> (grow, shrink, basis)
+
+The flex properties of a child.  `flex` is the React Native shorthand:
+`flex = 1` means "grow 1, shrink 1, basis 0", so the child takes the free
+space of its parent.  `flex_grow`, `flex_shrink` and `flex_basis` set the
+parts individually.
+"""
+function flex_factor(fiber)
+    props = fiber.props
+    grow = float(get(props, :flex_grow, 0))
+    shrink = float(get(props, :flex_shrink, 0))
+    basis = get(props, :flex_basis, nothing)
+    f = get(props, :flex, nothing)
+    if f !== nothing
+        grow = float(f)
+        shrink = 1.0
+        basis === nothing && (basis = 0.0)
+    end
+    return (grow = grow, shrink = shrink, basis = basis)
+end
+
+"""
+    main_bounds(fiber, dir, inner) -> (min, max)
+
+The minimum and maximum length of a child along the container's main axis.
+"""
+function main_bounds(fiber, dir, inner)
+    props = fiber.props
+    lo = resolve_length(get(props, dir === :row ? :min_width : :min_height, nothing),
+                        inner)
+    hi = resolve_length(get(props, dir === :row ? :max_width : :max_height, nothing),
+                        inner)
+    return (lo, hi)
+end
+
+"""
+    cross_bounds(fiber, dir, inner) -> (min, max)
+
+The minimum and maximum length of a child along the container's cross axis.
+"""
+function cross_bounds(fiber, dir, inner)
+    props = fiber.props
+    lo = resolve_length(get(props, dir === :row ? :min_height : :min_width, nothing),
+                        inner)
+    hi = resolve_length(get(props, dir === :row ? :max_height : :max_width, nothing),
+                        inner)
+    return (lo, hi)
+end
+
+"""
+    justify_mode(value)
+
+Normalize a `justify` prop (the main axis) to one of `:start`, `:end`,
+`:center`, `:between`, `:around` or `:evenly`.  The React Native spellings
+(`flex-start`, `space-between`, ...) are accepted as well.
+"""
+function justify_mode(value)
+    v = Symbol(value)
+    v === :flex_start && return :start
+    v === :flex_end && return :end
+    v === :space_between && return :between
+    v === :space_around && return :around
+    v === :space_evenly && return :evenly
+    return v in (:start, :end, :center, :between, :around, :evenly) ? v : :start
+end
+
+"""
+    align_mode(value)
+
+Normalize an `align` prop (the cross axis) to one of `:start`, `:end`,
+`:center` or `:stretch`.  The React Native spelling `flex-start` is accepted
+as well.
+"""
+function align_mode(value)
+    v = Symbol(value)
+    v === :flex_start && return :start
+    v === :flex_end && return :end
+    return v in (:start, :end, :center, :stretch) ? v : :start
+end
+
+"The cross-axis alignment of a child: its own `align_self` wins over the
+container's `align`."
+function child_align(child, align)
+    own = get(child.props, :align_self, nothing)
+    own === nothing && return align
+    return align_mode(own)
+end
+
+"""
+    flex_wrap(fiber) -> :nowrap | :wrap
+
+Whether the children of a container wrap onto several lines.  `wrap-reverse`
+is treated like `wrap` (the lines are stacked from the start).
+"""
+function flex_wrap(fiber)
+    v = Symbol(get(fiber.props, :flex_wrap, :nowrap))
+    v in (:wrap, :wrap_reverse) && return :wrap
+    return :nowrap
+end
+
+"""
+    flex_base(child, dir, measured)
+
+The main-axis size a child contributes to the natural size of its parent:
+its flex basis when it has one, its measured size otherwise.
+"""
+function flex_base(child, dir, measured)
+    fl = flex_factor(child)
+    fl.basis === nothing && return measured
+    b = resolve_length(fl.basis, measured)
+    return b === nothing ? measured : b
+end
+
+"""
+    flex_lines(bases, margins, gap, inner_main)
+
+Group the children into flex lines: a child that does not fit into the
+current line starts a new one.  Returns the indices of the children per
+line.
+"""
+function flex_lines(bases, margins, gap, inner_main)
+    lines = Vector{Vector{Int}}()
+    current = Int[]
+    used = 0.0
+    for i in eachindex(bases)
+        b = bases[i] + margins[i]
+        if !isempty(current) && used + gap + b > inner_main
+            push!(lines, current)
+            current = [i]
+            used = b
+        else
+            isempty(current) || (used += gap)
+            push!(current, i)
+            used += b
+        end
+    end
+    isempty(current) || push!(lines, current)
+    return lines
+end
+
+"""
+    fixed_length(fiber, prop) -> Union{Float64, Nothing}
+
+The `width`/`height` prop of a fiber when it is a fixed number.  A
+percentage (`"50%"`) is resolved in the place pass, against the size of the
+parent, and therefore has no value here.
+"""
+function fixed_length(fiber, prop)
+    v = get(fiber.props, prop, nothing)
+    v isa Number || return nothing
+    return float(v)
+end
+
 """
     measure!(fiber) -> (width, height)
 
@@ -144,10 +342,10 @@ function measure!(fiber)
     # before measuring absolute `fill` children, so a full-size absolute child
     # of a fixed-size container gets the container's final size.
     if !is_window(fiber)
-        pw0 = get(fiber.props, :width, nothing)
-        ph0 = get(fiber.props, :height, nothing)
-        pw0 !== nothing && (w = float(pw0))
-        ph0 !== nothing && (h = float(ph0))
+        pw0 = fixed_length(fiber, :width)
+        ph0 = fixed_length(fiber, :height)
+        pw0 !== nothing && (w = pw0)
+        ph0 !== nothing && (h = ph0)
     end
     for child in fiber.children
         is_absolute_child(child) || continue
@@ -157,10 +355,10 @@ function measure!(fiber)
             # explicit width/height still wins, which lets an absolute
             # full-width app bar keep its 64px height.
             measure!(child)
-            fw = get(child.props, :width, nothing)
-            fh = get(child.props, :height, nothing)
-            child.measured = (fw === nothing ? w : float(fw),
-                              fh === nothing ? h : float(fh))
+            fw = fixed_length(child, :width)
+            fh = fixed_length(child, :height)
+            child.measured = (fw === nothing ? w : fw,
+                              fh === nothing ? h : fh)
         else
             measure!(child)
         end
@@ -168,10 +366,10 @@ function measure!(fiber)
     # Same guard as above: an explicitly sized window is sized by its real
     # (possibly user-resized) OS size, not by its creation props.
     if !is_window(fiber)
-        pw = get(fiber.props, :width, nothing)
-        ph = get(fiber.props, :height, nothing)
-        pw !== nothing && (w = float(pw))
-        ph !== nothing && (h = float(ph))
+        pw = fixed_length(fiber, :width)
+        ph = fixed_length(fiber, :height)
+        pw !== nothing && (w = pw)
+        ph !== nothing && (h = ph)
     end
     fiber.measured = (w, h)
     return fiber.measured
@@ -185,24 +383,57 @@ function measure_box(fiber)
     main, cross = dir === :column ? 2py : 2px, 0.0
     # Regular children first: they determine the cross size that `fill`
     # children stretch across.
+    bases = Float64[]
+    margins = Float64[]
     for child in kids
         get(child.props, :fill, false) && continue
         cw, ch = measure!(child)
-        main += dir === :column ? ch : cw
+        base = flex_base(child, dir, dir === :column ? ch : cw)
+        push!(bases, base)
+        push!(margins, dir === :column ? margin_of(child)[2] : margin_of(child)[1])
+        main += base
         cross = max(cross, dir === :column ? cw : ch)
     end
     for child in kids
         get(child.props, :fill, false) || continue
         cw, ch = measure!(child)
+        base = flex_base(child, dir, dir === :column ? ch : cw)
+        push!(bases, base)
+        push!(margins, dir === :column ? margin_of(child)[2] : margin_of(child)[1])
         if dir === :column
             child.measured = (cross, ch)
-            main += ch
+            main += base
         else
             child.measured = (cw, cross)
-            main += cw
+            main += base
         end
     end
     main += gap * max(length(kids) - 1, 0)
+    # Wrapped children form lines: the container is then as tall (or wide) as
+    # the lines together.  Only a container with a definite main size can
+    # break its lines.
+    if flex_wrap(fiber) === :wrap && !isempty(kids)
+        fixed = get(fiber.props, dir === :row ? :width : :height, nothing)
+        fixed === nothing || begin
+            inner = float(fixed) - (dir === :column ? 2py : 2px)
+            lines = flex_lines(bases, margins, gap, inner)
+            if length(lines) > 1
+                line_cross = 0.0
+                for line in lines
+                    lc = 0.0
+                    for i in line
+                        child = kids[i]
+                        cw, ch = child.measured
+                        lc = max(lc, dir === :column ? cw : ch)
+                    end
+                    line_cross += lc
+                end
+                line_cross += gap * (length(lines) - 1)
+                cross = max(cross, line_cross)
+                main = float(fixed)
+            end
+        end
+    end
     return dir === :column ? (cross + 2px, main) : (main, cross + 2py)
 end
 
@@ -269,26 +500,17 @@ function place!(fiber, x, y)
             place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h)
         end
     else
-        # Component fibers lay their output out like a gap-less column. A
-        # `fill` child stretches to the component's (possibly constrained)
-        # width, so a component that returns a host box can fill the space its
-        # parent allocated (e.g. a pinned TopAppBar component).
-        cy = y
-        for child in flow_children(fiber)
-            if get(child.props, :fill, false)
-                if Symbol(get(child.props, :position, :relative)) === _ABSOLUTE
-                    fw = get(child.props, :width, nothing)
-                    fh = get(child.props, :height, nothing)
-                    child.measured = (fw === nothing ? w : float(fw),
-                                      fh === nothing ? h : float(fh))
-                else
-                    child.measured = (w, child.measured[2])
-                end
-            end
-            place!(child, x, cy)
-            cy += child.measured[2]
-        end
-        place_absolute_children!(fiber, x, y, w, h)
+        # Component fibers lay their output out like a gap-less column, with
+        # the same flex rules as a box. A `fill` child stretches to the
+        # component's (possibly constrained) width, so a component that
+        # returns a host box can fill the space its parent allocated (e.g. a
+        # pinned TopAppBar component).
+        dir = Symbol(get(fiber.props, :direction, :column))
+        gap = float(get(fiber.props, :gap, 0))
+        p = padding_of(fiber)
+        align = Symbol(get(fiber.props, :align, :start))
+        justify = Symbol(get(fiber.props, :justify, :start))
+        place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h)
     end
     return
 end
@@ -369,8 +591,8 @@ function measure_image(fiber)
     path === nothing && return (0.0, 0.0)
     nw, nh = image_file_size(path)
     (nw <= 0 || nh <= 0) && return (0.0, 0.0)
-    w = get(fiber.props, :width, nothing)
-    h = get(fiber.props, :height, nothing)
+    w = fixed_length(fiber, :width)
+    h = fixed_length(fiber, :height)
     if w !== nothing && h !== nothing
         return (float(w), float(h))
     elseif w !== nothing && nw > 0
@@ -445,44 +667,176 @@ function place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h;
     cx0, cy0 = x + px - offset_x, y + py - offset_y
     content_w, content_h = max(w - 2px, 0.0), max(h - 2py, 0.0)
     kids = collect(flow_children(fiber))
-    if dir === :column
-        main = sum(child -> child.measured[2], kids; init = 0.0) +
-               gap * max(length(kids) - 1, 0)
-        cy = cy0 + (justify === :center ? (content_h - main) / 2 :
-                    justify === :end ? content_h - main : 0.0)
-        stretch = Bool(get(fiber.props, :stretch_children, false))
-        for child in kids
-            # `fill` stretches across the parent's content box even when the
-            # parent's size was fixed/filled after measurement (e.g. a
-            # ScrollView content column matching the viewport width).
-            # `stretch_children` does the same for every child without an
-            # explicit width, which lets a page host stretch a component whose
-            # own output wants to fill (e.g. a tab page).
-            if get(child.props, :fill, false) ||
-               (stretch && get(child.props, :width, nothing) === nothing)
-                child.measured = (content_w, child.measured[2])
+    inner_main = dir === :column ? content_h : content_w
+    inner_cross = dir === :column ? content_w : content_h
+    align = align_mode(align)
+    justify = justify_mode(justify)
+    stretch = Bool(get(fiber.props, :stretch_children, false))
+
+    # Base sizes, margins and flex factors of every child.
+    bases = Float64[]
+    margins = Float64[]
+    grows = Float64[]
+    shrinks = Float64[]
+    bounds = Vector{Tuple{Union{Nothing,Float64},Union{Nothing,Float64}}}()
+    for child in kids
+        fl = flex_factor(child)
+        cm, xm = margin_of(child)
+        main_margin = dir === :column ? xm : cm
+        # The child's own main-axis size: an explicit width/height wins over
+        # the measured size, a percentage resolves against the container.
+        explicit_main = resolve_length(
+            get(child.props, dir === :row ? :width : :height, nothing), inner_main)
+        fallback = explicit_main === nothing ? main_size(dir, child.measured) :
+                   explicit_main
+        base = fl.basis === nothing ? fallback :
+               something(resolve_length(fl.basis, inner_main), fallback)
+        lo, hi = main_bounds(child, dir, inner_main)
+        lo !== nothing && (base = max(base, lo))
+        hi !== nothing && (base = min(base, hi))
+        push!(bases, base)
+        push!(margins, main_margin)
+        push!(grows, fl.grow)
+        push!(shrinks, fl.shrink)
+        push!(bounds, (lo, hi))
+    end
+
+    # Children that wrap form lines; every line then gets the free space of
+    # the container on its own.
+    lines = flex_wrap(fiber) === :wrap && !isempty(kids) ?
+            flex_lines(bases, margins, gap, inner_main) : [collect(1:length(kids))]
+
+    # Distribute the free space of every line along the main axis: children
+    # with a grow factor share the surplus, children that do not fit share
+    # the deficit weighted by their shrink factor and their base size.
+    finals = copy(bases)
+    for line in lines
+        used = sum(i -> bases[i] + margins[i], line; init = 0.0) +
+               gap * max(length(line) - 1, 0)
+        free = inner_main - used
+        if free > 0
+            total = sum(i -> grows[i], line; init = 0.0)
+            if total > 0
+                for i in line
+                    finals[i] = bases[i] + free * grows[i] / total
+                end
             end
-            cw = child.measured[1]
-            cxx = align === :center ? cx0 + (content_w - cw) / 2 :
-                  align === :end ? cx0 + content_w - cw : cx0
-            place!(child, cxx, cy)
-            cy += child.measured[2] + gap
-        end
-    else
-        main = sum(child -> child.measured[1], kids; init = 0.0) +
-               gap * max(length(kids) - 1, 0)
-        cx = cx0 + (justify === :center ? (content_w - main) / 2 :
-                    justify === :end ? content_w - main : 0.0)
-        for child in kids
-            if get(child.props, :fill, false)
-                child.measured = (child.measured[1], content_h)
+        elseif free < 0
+            weights = [shrinks[i] * bases[i] for i in line]
+            total = sum(weights; init = 0.0)
+            if total > 0
+                for (k, i) in enumerate(line)
+                    finals[i] = bases[i] + free * weights[k] / total
+                end
             end
-            ch = child.measured[2]
-            cyy = align === :center ? cy0 + (content_h - ch) / 2 :
-                  align === :end ? cy0 + content_h - ch : cy0
-            place!(child, cx, cyy)
-            cx += child.measured[1] + gap
         end
+        # The flexed size is clamped to the child's own bounds.  A child that
+        # hits its bound leaves space over, which the others get: the line is
+        # distributed again with the sizes that were actually taken.
+        clamped = Set{Int}()
+        for i in line
+            lo, hi = bounds[i]
+            if lo !== nothing
+                finals[i] < lo && push!(clamped, i)
+                finals[i] = max(finals[i], lo)
+            end
+            if hi !== nothing
+                finals[i] > hi && push!(clamped, i)
+                finals[i] = min(finals[i], hi)
+            end
+        end
+        if !isempty(clamped)
+            used = sum(i -> finals[i] + margins[i], line; init = 0.0) +
+                   gap * max(length(line) - 1, 0)
+            free = inner_main - used
+            room = [i for i in line if grows[i] > 0 && !(i in clamped)]
+            total = sum(i -> grows[i], room; init = 0.0)
+            if free > 0 && total > 0
+                for i in room
+                    finals[i] += free * grows[i] / total
+                end
+                for i in line
+                    lo, hi = bounds[i]
+                    lo !== nothing && (finals[i] = max(finals[i], lo))
+                    hi !== nothing && (finals[i] = min(finals[i], hi))
+                end
+            end
+        end
+    end
+
+    # Cross-axis sizes: an explicit width/height wins, `fill` and
+    # `align = :stretch` stretch the child across the content box.
+    crosses = Float64[]
+    for child in kids
+        cw, ch = child.measured
+        explicit = resolve_length(
+            get(child.props, dir === :column ? :width : :height, nothing),
+            inner_cross)
+        cross = explicit === nothing ? cross_size(dir, (cw, ch)) : explicit
+        if explicit === nothing &&
+           (get(child.props, :fill, false) ||
+            (stretch && get(child.props, dir === :column ? :width : :height,
+                            nothing) === nothing) ||
+            child_align(child, align) === :stretch)
+            cross = inner_cross
+        end
+        lo, hi = cross_bounds(child, dir, inner_cross)
+        lo !== nothing && (cross = max(cross, lo))
+        hi !== nothing && (cross = min(cross, hi))
+        push!(crosses, cross)
+    end
+
+    # Place the lines (cross axis) and the children (main axis).
+    line_cross = 0.0
+    for line in lines
+        lc = 0.0
+        for i in line
+            lc = max(lc, crosses[i])
+        end
+        used = sum(i -> finals[i] + margins[i], line; init = 0.0) +
+               gap * max(length(line) - 1, 0)
+        leftover = inner_main - used
+        offset = 0.0
+        between = 0.0
+        if justify === :center
+            offset = leftover / 2
+        elseif justify === :end
+            offset = leftover
+        elseif justify === :between && length(line) > 1
+            between = leftover / (length(line) - 1)
+        elseif justify === :around
+            between = leftover / length(line)
+            offset = between / 2
+        elseif justify === :evenly
+            between = leftover / (length(line) + 1)
+            offset = between
+        end
+        cursor = offset
+        for i in line
+            child = kids[i]
+            main_i = finals[i]
+            cross_i = crosses[i]
+            # The child's own size on both axes.
+            if dir === :column
+                child.measured = (cross_i, main_i)
+            else
+                child.measured = (main_i, cross_i)
+            end
+            cm, xm = margin_of(child)
+            cross_offset = child_align(child, align) === :center ?
+                           (inner_cross - cross_i) / 2 :
+                           child_align(child, align) === :end ?
+                           inner_cross - cross_i : 0.0
+            if dir === :column
+                place!(child, cx0 + cross_offset + cm,
+                       cy0 + line_cross + xm + cursor)
+            else
+                place!(child, cx0 + cm + cursor,
+                       cy0 + line_cross + cross_offset + xm)
+            end
+            cursor += main_i + margins[i] + gap + between
+        end
+        line_cross += lc + gap
     end
     # Absolutely positioned children are placed relative to the parent's
     # top-left corner, honoring overlay anchors (`align` prop): `:top_left`
@@ -500,8 +854,9 @@ function place_absolute_children!(fiber, x, y, w, h)
         dx = float(get(child.props, :x, 0))
         dy = float(get(child.props, :y, 0))
         if get(child.props, :fill, false)
-            fw = get(child.props, :width, nothing)
-            fh = get(child.props, :height, nothing)
+            # A percentage resolves against the parent box.
+            fw = resolve_length(get(child.props, :width, nothing), w)
+            fh = resolve_length(get(child.props, :height, nothing), h)
             bottom = get(child.props, :bottom, nothing)
             # A fill child stretches to the parent box; with a `bottom` inset
             # (and no explicit height) it instead spans from its `y` offset
@@ -509,8 +864,8 @@ function place_absolute_children!(fiber, x, y, w, h)
             # like a status bar keep their room when the window resizes.
             fh === nothing && bottom !== nothing &&
                 (fh = max(h - dy - float(bottom), 0.0))
-            child.measured = (fw === nothing ? w : float(fw),
-                              fh === nothing ? h : float(fh))
+            child.measured = (fw === nothing ? w : fw,
+                              fh === nothing ? h : fh)
         end
         cw, ch = child.measured
         calign = Symbol(get(child.props, :anchor,

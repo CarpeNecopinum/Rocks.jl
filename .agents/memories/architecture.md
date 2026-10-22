@@ -25,6 +25,17 @@ Key architecture decisions of Rocks.jl (React-style GUI framework on SDL3):
   compatibility, like React without keyed reordering), runs effects, lays
   out (measure + place) and draws each window with vsync + dirty-only
   drawing.
+- **Layout is React Native style flexbox**: a container has a main axis
+  (`direction`) and a cross axis; a child has a flex basis (`flex_basis`, or
+  its measured size) and shares the free space by `flex_grow`/`flex_shrink`
+  (`flex = 1` is the shorthand for grow 1, shrink 1, basis 0).  `justify`
+  distributes along the main axis, `align` across the cross axis, and
+  `flex_wrap = :wrap` breaks the children into lines.  The measure pass
+  computes the natural sizes (a flex basis counts, not the grown size); the
+  place pass distributes the free space of the *final* container size, which
+  is where a child that hits its `max_width` leaves the space to the others.
+  `align` defaults to `:start` (React Native defaults to `:stretch`) so the
+  existing look is kept.
 - **Windows are components**: any `Window` element anywhere in the tree is
   hoisted into its own SDL window (multi-window apps and dialogs are
   conditional rendering).

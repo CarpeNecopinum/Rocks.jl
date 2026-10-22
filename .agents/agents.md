@@ -70,7 +70,15 @@ timer — an idle application draws nothing.
   (only passed when non-empty) and return an `Element`, a tuple/vector of
   elements, `nothing`, or a string.
 - Layout props shared by Box-like hosts: `direction`, `gap`, `padding`,
-  `align`, `width`, `height`, `position`/`x`/`y`.
+  `align`, `justify`, `width`, `height`, `position`/`x`/`y`, and the
+  flexbox props `flex`, `flex_grow`, `flex_shrink`, `flex_basis`,
+  `align_self`, `flex_wrap`, `margin`, `min_width`/`max_width`/
+  `min_height`/`max_height` (a percentage is written as `"50%"`).
+- The layout follows the React Native flexbox model: a container has a main
+  axis (`direction`) and a cross axis, children have a flex basis and share
+  the free space by `flex_grow`/`flex_shrink`, `justify` distributes along the
+  main axis and `align` across the cross axis.  `align` defaults to `:start`
+  (React Native uses `:stretch`) to keep the existing look.
 - Colors: accept tuples (all-int → 0-255, any-float → 0-1), hex strings, or
   ColorTypes — normalize through `_to_rgba`.
 

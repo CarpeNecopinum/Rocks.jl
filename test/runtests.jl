@@ -460,6 +460,202 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         end
     end
 
+    @testset "flexbox layout" begin
+        # `flex` is the React Native shorthand: `flex = 1` means grow 1,
+        # shrink 1 and a basis of 0, so the child takes the free space of
+        # its parent.
+        function FlexApp()
+            @rock Window(
+                @rock Column(
+                    @rock Box(; width = 40, height = 20; flex = 1),
+                    @rock Box(; width = 40, height = 20);
+                    width = 200, height = 120, gap = 10);
+                title = "flex", width = 240, height = 160)
+        end
+        with_tree(FlexApp) do root
+            w = sync_windows!(root)[1]
+            col = w.children[1].children[1]
+            grown, fixed = col.children
+            # The window is 160 high, the column 120: the free 80px go to
+            # the flexible child.
+            @test grown.rect[4] == 120 - 20 - 10
+            @test fixed.rect[4] == 20
+            @test fixed.rect[2] == grown.rect[2] + grown.rect[4] + 10
+        end
+
+        # Two growing children share the free space proportionally.
+        function GrowApp()
+            @rock Window(
+                @rock Row(
+                    @rock Box(; width = 20, height = 10; flex = 1),
+                    @rock Box(; width = 20, height = 10; flex = 3);
+                    width = 200, height = 40, gap = 0);
+                title = "grow", width = 240, height = 80)
+        end
+        with_tree(GrowApp) do root
+            w = sync_windows!(root)[1]
+            row = w.children[1].children[1]
+            a, b = row.children
+            @test a.rect[3] == 50
+            @test b.rect[3] == 150
+            @test a.rect[1] == 0
+            @test b.rect[1] == 50
+        end
+
+        # `flex_grow` grows, `flex_shrink` shrinks: a row that is too narrow
+        # shrinks its children into the available width.
+        function ShrinkApp()
+            @rock Window(
+                @rock Row(
+                    @rock Box(; width = 100, height = 10; flex_shrink = 1),
+                    @rock Box(; width = 100, height = 10; flex_shrink = 1);
+                    width = 100, height = 20, gap = 0);
+                title = "shrink", width = 140, height = 60)
+        end
+        with_tree(ShrinkApp) do root
+            w = sync_windows!(root)[1]
+            row = w.children[1].children[1]
+            a, b = row.children
+            @test a.rect[3] == 50
+            @test b.rect[3] == 50
+        end
+
+        # `flex_basis` sets the size before the free space is distributed: the
+        # basis of 60px is the starting point, the free space is then split
+        # between the two growing children.
+        function BasisApp()
+            @rock Window(
+                @rock Row(
+                    @rock Box(; width = 10, height = 10; flex = 1, flex_basis = 60),
+                    @rock Box(; width = 10, height = 10; flex = 1);
+                    width = 200, height = 20, gap = 0);
+                title = "basis", width = 240, height = 60)
+        end
+        with_tree(BasisApp) do root
+            w = sync_windows!(root)[1]
+            row = w.children[1].children[1]
+            a, b = row.children
+            @test a.rect[3] == 130
+            @test b.rect[3] == 70
+        end
+
+        # `justify` distributes the children along the main axis, `align`
+        # across the cross axis.  The React Native spellings work too.
+        function JustifyApp()
+            @rock Window(
+                @rock Column(
+                    @rock Box(; width = 20, height = 10),
+                    @rock Box(; width = 20, height = 10);
+                    width = 100, height = 100, gap = 0, justify = :center);
+                title = "justify", width = 140, height = 140)
+        end
+        with_tree(JustifyApp) do root
+            w = sync_windows!(root)[1]
+            col = w.children[1].children[1]
+            a, b = col.children
+            # The two 10px children sit centered in the 100px column.
+            @test a.rect[2] == 40
+            @test b.rect[2] == 50
+        end
+
+        function SpaceApp()
+            @rock Window(
+                @rock Row(
+                    @rock Box(; width = 20, height = 10),
+                    @rock Box(; width = 20, height = 10),
+                    @rock Box(; width = 20, height = 10);
+                    width = 120, height = 20, gap = 0, justify = :space_between);
+                title = "space", width = 160, height = 60)
+        end
+        with_tree(SpaceApp) do root
+            w = sync_windows!(root)[1]
+            row = w.children[1].children[1]
+            a, b, c = row.children
+            @test a.rect[1] == 0
+            @test b.rect[1] == 50
+            @test c.rect[1] == 100
+        end
+
+        # `align = :stretch` (and `align_self`) stretch across the cross axis.
+        # A child with an explicit size keeps it.
+        function StretchApp()
+            @rock Window(
+                @rock Row(
+                    @rock Box(; width = 20; flex = 1),
+                    @rock Box(; width = 20, height = 20; flex = 1, align_self = :end);
+                    width = 100, height = 60, align = :stretch);
+                title = "stretch", width = 140, height = 100)
+        end
+        with_tree(StretchApp) do root
+            w = sync_windows!(root)[1]
+            row = w.children[1].children[1]
+            a, b = row.children
+            # The first child stretches to the full height of the row, the
+            # second keeps its own height and sits at the end.
+            @test a.rect[4] == 60
+            @test a.rect[2] == 0
+            @test b.rect[4] == 20
+            @test b.rect[2] == 40
+        end
+
+        # Percentages resolve against the parent, `margin` pushes a child
+        # away from the edges.
+        function PercentApp()
+            @rock Window(
+                @rock Column(
+                    @rock Box(; width = "50%", height = 10),
+                    @rock Box(; width = 20, height = 10; margin = 5);
+                    width = 200, height = 100, gap = 0);
+                title = "percent", width = 240, height = 140)
+        end
+        with_tree(PercentApp) do root
+            w = sync_windows!(root)[1]
+            col = w.children[1].children[1]
+            half, margined = col.children
+            @test half.rect[3] == 100
+            @test margined.rect[1] == 5
+            @test margined.rect[2] == 15
+        end
+
+        # `min_width`/`max_width` clamp the flexed size.
+        function BoundsApp()
+            @rock Window(
+                @rock Row(
+                    @rock Box(; width = 10, height = 10; flex = 1, max_width = 40),
+                    @rock Box(; width = 10, height = 10; flex = 1);
+                    width = 200, height = 20, gap = 0);
+                title = "bounds", width = 240, height = 60)
+        end
+        with_tree(BoundsApp) do root
+            w = sync_windows!(root)[1]
+            row = w.children[1].children[1]
+            a, b = row.children
+            @test a.rect[3] == 40
+            @test b.rect[3] == 160
+        end
+
+        # Wrapping children form lines: the children that do not fit into the
+        # main axis move to the next line.
+        function WrapApp()
+            @rock Window(
+                @rock Row(
+                    @rock Box(; width = 40, height = 20),
+                    @rock Box(; width = 40, height = 20),
+                    @rock Box(; width = 40, height = 20);
+                    width = 100, height = 60, gap = 0, flex_wrap = :wrap);
+                title = "wrap", width = 140, height = 100)
+        end
+        with_tree(WrapApp) do root
+            w = sync_windows!(root)[1]
+            row = w.children[1].children[1]
+            a, b, c = row.children
+            # Two children fit on the first line, the third wraps below.
+            @test a.rect[2] == 0
+            @test b.rect[2] == 0
+            @test c.rect[2] == 20
+        end
+    end
+
     @testset "padding axes and justify" begin
         function App()
             @rock Window(
