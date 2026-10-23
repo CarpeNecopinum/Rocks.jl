@@ -23,6 +23,15 @@ const LAST_KEYMODS = Ref(Cuint(0))
 const HAND_CURSOR = Ref{SDL3.Cursor}(C_NULL)
 const ARROW_CURSOR = Ref{SDL3.Cursor}(C_NULL)
 const TEXT_CURSOR = Ref{SDL3.Cursor}(C_NULL)
+const GRAB_CURSOR = Ref{SDL3.Cursor}(C_NULL)      # open hand (pan-ready)
+const GRABBING_CURSOR = Ref{SDL3.Cursor}(C_NULL)  # closed hand (panning)
+
+# SDL3 appended GRAB and GRABBING after the pointer names this SDL3.jl
+# binding knows; the enum is ABI-stable (new values are appended, never
+# renumbered), so they are requested directly and the code falls back to the
+# pointing hand when the native library predates them.
+const _SDL_SYSTEM_CURSOR_GRAB = Int32(21)
+const _SDL_SYSTEM_CURSOR_GRABBING = Int32(22)
 
 # Set when the video driver has no system cursors (headless drivers).
 const CURSORS_UNAVAILABLE = Ref(false)
@@ -105,6 +114,39 @@ function find_scrollable(target)
         is_scrollable(f) && return f
         is_window(f) && return nothing
         f = f.parent
+    end
+    return nothing
+end
+
+"Nearest fiber carrying an explicit `:on_wheel` prop, innermost first. Such a
+fiber consumes the wheel before scroll containers, so a `Canvas` can zoom
+while sitting inside a `ScrollView`."
+function find_wheel_target(target)
+    f = target
+    while f !== nothing
+        haskey(f.props, :on_wheel) && return f
+        is_window(f) && return nothing
+        f = f.parent
+    end
+    return nothing
+end
+
+# Wheel callback`: `on_wheel(dx, dy, x, y)` where dx/dy are the raw (not
+# step-multiplied) wheel deltas and (x, y) the pointer in consumer-local
+# coordinates; `(dx, dy)` and no-argument forms are also accepted.
+function callback_wheel!(props, dx, dy, x, y)
+    f = get(props, :on_wheel, nothing)
+    f isa Function || return
+    try
+        if hasmethod(f, Tuple{Any,Any,Any,Any})
+            f(dx, dy, x, y)
+        elseif hasmethod(f, Tuple{Any,Any})
+            f(dx, dy)
+        else
+            f()
+        end
+    catch err
+        @warn "Rocks: callback :on_wheel failed" exception = (err, catch_backtrace())
     end
     return nothing
 end
@@ -285,15 +327,25 @@ function slider_drag_update!(fiber, x, y)
     return nothing
 end
 
-"Nearest `Pressable` ancestor of a fiber, not crossing window boundaries."
+"Nearest interactive ancestor of a fiber (`Pressable` or `Canvas`), not
+crossing window boundaries."
 function find_pressable(fiber)
     while fiber !== nothing
-        fiber.kind === _PRESSABLE && return fiber
+        is_pressable_kind(fiber.kind) && return fiber
         is_window(fiber) && return nothing
         fiber = fiber.parent
     end
     return nothing
 end
+
+"Whether a host kind responds to pointer events like a `Pressable`."
+is_pressable_kind(kind) = kind === _PRESSABLE || kind === _CANVAS
+
+# Canvas pointer callbacks receive canvas-local coordinates (0,0 = canvas
+# top-left) so hit-testing and drawing share one transform; other pressables
+# keep their existing window-coordinate semantics.
+_locals(fiber, x, y) =
+    fiber.kind === _CANVAS ? (x - fiber.rect[1], y - fiber.rect[2]) : (x, y)
 
 inside((rx, ry, rw, rh), x, y) = rx <= x < rx + rw && ry <= y < ry + rh
 
@@ -376,19 +428,35 @@ function update_cursor()
             HAND_CURSOR[] = SDL3.CreateSystemCursor(SDL3.SDL_SYSTEM_CURSOR_POINTER)
             ARROW_CURSOR[] = SDL3.CreateSystemCursor(SDL3.SDL_SYSTEM_CURSOR_DEFAULT)
             TEXT_CURSOR[] = SDL3.CreateSystemCursor(SDL3.SDL_SYSTEM_CURSOR_TEXT)
+            grab = SDL3.CreateSystemCursor(_SDL_SYSTEM_CURSOR_GRAB)
+            grabbing = SDL3.CreateSystemCursor(_SDL_SYSTEM_CURSOR_GRABBING)
+            GRAB_CURSOR[] = grab
+            GRABBING_CURSOR[] = grabbing
         catch
             # Headless video drivers have no system cursors; the pointer then
             # stays whatever the window manager shows.
             CURSORS_UNAVAILABLE[] = true
         end
+        GRAB_CURSOR[] == C_NULL && (GRAB_CURSOR[] = HAND_CURSOR[])
+        GRABBING_CURSOR[] == C_NULL && (GRABBING_CURSOR[] = HAND_CURSOR[])
     end
     cursor = ARROW_CURSOR[]
-    if HOVERED_ACTIVE[]
+    # An actively-pressed fiber that pans (`cursor = :grab`, e.g. a Canvas)
+    # shows the closed grabbing hand wherever the pointer is until release.
+    grabbing_now = any(get(p.props, :cursor, nothing) === :grab
+                       for (_, p) in ACTIVE_PRESS)
+    if grabbing_now
+        cursor = GRABBING_CURSOR[]
+    elseif HOVERED_ACTIVE[]
         # A hovered pressable that asks for a text pointer (e.g. a TextBox)
-        # shows the I-beam; everything else hoverable is a clickable control.
+        # shows the I-beam; one asking to pan shows the open grab hand;
+        # everything else hoverable is a clickable control.
         wants_text = any(get(p.props, :cursor, nothing) === :text
                          for p in values(HOVERED))
-        cursor = wants_text ? TEXT_CURSOR[] : HAND_CURSOR[]
+        wants_grab = any(get(p.props, :cursor, nothing) === :grab
+                         for p in values(HOVERED))
+        cursor = wants_text ? TEXT_CURSOR[] :
+                 wants_grab ? GRAB_CURSOR[] : HAND_CURSOR[]
     end
     cursor == C_NULL || SDL3.SetCursor(cursor)
     return nothing
@@ -523,8 +591,10 @@ function dispatch_event!(event::SDL3.Event)
         if pressable !== nothing && !Bool(get(pressable.props, :disabled, false))
             ACTIVE_PRESS[(wid, UInt8(button))] = pressable
             pressable.host isa PressState && (pressable.host.pressed = true)
-            callback_press!(pressable.props, :on_press_in, mx, my, button)
+            lx, ly = _locals(pressable, mx, my)
+            callback_press!(pressable.props, :on_press_in, lx, ly, button)
             mark_window_draw!(wid)
+            update_cursor()
         end
     elseif ty == SDL3.SDL_EVENT_MOUSE_BUTTON_UP
         mev = SDL3.as_mouse_button(event)
@@ -540,11 +610,13 @@ function dispatch_event!(event::SDL3.Event)
         mx, my = Float64(mev.x), Float64(mev.y)
         pressable.host isa PressState && (pressable.host.pressed = false)
         callback(pressable.props, :on_press_out)
-        if pressable.mounted && pressable.kind === _PRESSABLE &&
+        lx, ly = _locals(pressable, mx, my)
+        if pressable.mounted && is_pressable_kind(pressable.kind) &&
            inside(pressable.rect, mx, my) && !Bool(get(pressable.props, :disabled, false))
-            callback_press!(pressable.props, :on_press, mx, my, button)
+            callback_press!(pressable.props, :on_press, lx, ly, button)
         end
         mark_window_draw!(wid)
+        update_cursor()
     elseif ty == SDL3.SDL_EVENT_MOUSE_MOTION
         mev = SDL3.as_mouse_motion(event)
         wid = mev.windowID
@@ -562,8 +634,9 @@ function dispatch_event!(event::SDL3.Event)
         if pressable !== nothing && haskey(pressable.props, :on_drag)
             f = pressable.props[:on_drag]
             if f isa Function
+                lx, ly = _locals(pressable, mx, my)
                 try
-                    f(mx, my)
+                    f(lx, ly)
                 catch err
                     @warn "Rocks: callback :on_drag failed" exception =
                         (err, catch_backtrace())
@@ -579,9 +652,6 @@ function dispatch_event!(event::SDL3.Event)
         fiber = get(WINDOW_BY_ID, wid, nothing)
         fiber === nothing && return
         x, y = pointer_position(wid)
-        target = hit_test(fiber, x, y)
-        scroll = find_scrollable(target)
-        scroll === nothing && return
         dx = Float64(wev.x)
         dy = Float64(wev.y)
         if dx == 0.0 && dy == 0.0
@@ -591,6 +661,19 @@ function dispatch_event!(event::SDL3.Event)
         if wev.direction == SDL3.SDL_MOUSEWHEEL_FLIPPED
             dx, dy = -dx, -dy
         end
+        target = hit_test(fiber, x, y)
+        # A fiber with an explicit `:on_wheel` prop (e.g. a Canvas that zooms)
+        # consumes the wheel before scroll containers: the innermost handler
+        # wins.
+        wheel = find_wheel_target(target)
+        if wheel !== nothing && !Bool(get(wheel.props, :disabled, false))
+            lx, ly = _locals(wheel, x, y)
+            callback_wheel!(wheel.props, dx, dy, lx, ly)
+            mark_window_draw!(wid)
+            return
+        end
+        scroll = find_scrollable(target)
+        scroll === nothing && return
         scroll_by!(scroll, dx, dy)
     elseif ty == SDL3.SDL_EVENT_KEY_DOWN
         kev = SDL3.as_keyboard(event)

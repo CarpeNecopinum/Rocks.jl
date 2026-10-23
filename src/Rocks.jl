@@ -57,7 +57,7 @@ include(joinpath("Enterprise", "Enterprise.jl"))
 
 export @rock, @use, render, quit!, screenshot,
        Window, Box, Text, Pressable, Row, Column, ScrollView,
-       Image, Split, Slider, LinearGradient,
+       Image, Split, Slider, Canvas, LinearGradient,
        Button, Checkbox, Toggle, RadioGroup, DropDownMenu, Tabber, ProgressBar,
        createContext, Context,
        useEffect, useMemo, useCallback, use_fiber,

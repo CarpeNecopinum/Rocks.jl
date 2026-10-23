@@ -824,6 +824,56 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         end
     end
 
+    @testset "canvas wheel" begin
+        seen = Ref{Any}(nothing)
+        function App()
+            @rock Window(
+                @rock Canvas(;
+                    draw = _ -> nothing,
+                    on_wheel = (dx, dy, x, y) -> seen[] = (dx, dy, x, y),
+                    flex = 1, fill = true);
+                title = "wheel", width = 200, height = 100)
+        end
+        with_tree(App) do root
+            w = sync_windows!(root)[1]
+            canvas = w.children[1]
+            @test canvas.kind === Canvas
+            # `dy = -1` is one wheel notch; the callback sees the raw delta and
+            # the pointer in canvas-local coordinates
+            push_wheel!(w, 120, 70; dx = 0, dy = -1)
+            drain_events!()
+            @test seen[] == (0.0, -1.0, 120.0, 70.0)
+        end
+
+        # An `on_wheel` canvas zooms inside a scroll view instead of scrolling
+        # it; wheel over a sibling without the prop scrolls the view as usual.
+        zooms = Ref(0)
+        function BothApp()
+            @rock Window(
+                @rock ScrollView(
+                    @rock Canvas(;
+                        draw = _ -> nothing,
+                        on_wheel = (dx, dy, x, y) -> zooms[] += 1,
+                        width = 200, height = 50),
+                    @rock Box(; width = 200, height = 2_000,
+                              background = (0.2, 0.7, 0.3));
+                    position = :absolute, fill = true, scroll_step = 40);
+                title = "both", width = 200, height = 100)
+        end
+        with_tree(BothApp) do root
+            w = sync_windows!(root)[1]
+            sv = w.children[1]
+            push_wheel!(w, 100, 20)              # over the canvas → zoom
+            drain_events!()
+            @test zooms[] == 1
+            @test sv.host.offset == 0
+            push_wheel!(w, 100, 70; dy = -1)     # over the box → scroll
+            drain_events!()
+            @test zooms[] == 1
+            @test sv.host.offset == 40
+        end
+    end
+
     @testset "headless run" begin
         renders = Ref(0)
         ticks = Ref(0)

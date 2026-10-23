@@ -995,6 +995,248 @@ function draw_image!(fiber, renderer)
     return nothing
 end
 
+# ---- canvas --------------------------------------------------------------
+
+"""
+    Rocks.CanvasContext
+
+The immediate-mode drawing surface passed to a [`Canvas`](@ref) element's
+`draw` callback. Helpers draw in **canvas-local** coordinates: `(0, 0)` is the
+top-left of the canvas and the y axis points down, matching the SDL/draw
+axis that the rest of Rocks uses (`fiber.rect` is `(x, y, w, h)` in the
+window's client area). `ctx.rect` returns that window-space rect, so a caller
+can convert local ⇄ window coordinates.
+
+All color arguments accept the same forms as everywhere else in Rocks
+(tuples/vectors of 3–4 numbers on the 0–1 or 0–255 scale, hex strings
+`"#rgb"`/`"#rrggbb"`/`"#rrggbbaa"`, or `ColorTypes` colors). No state persists
+between frames: `draw` re-issues every primitive each redraw, so the canvas is
+recomputed from scratch like the rest of the tree.
+
+    ctx.clear([color])                 fill the whole canvas with `color` (or transparent)
+    ctx.set_color(color)               set the stroke/fill colour for later calls
+    ctx.rect(x, y, w, h; color, fill)  stroked or filled rectangle (canvas-local)
+    ctx.line(x1, y1, x2, y2; color, width)   single line segment
+    ctx.polyline(pts; color, width, closed)  polyline; pts = iterable of (x, y);
+                                             closed loops back to pts[1]
+    ctx.polygon(pts; color)            filled polygon (ear-clip free: triangle fan)
+    ctx.points(pts; color, size)       filled square dots
+    ctx.text(str, x, y; size, color, font)  TTF text, top-left at (x, y)
+    ctx.texture(tex, x, y; w, h)       blit a caller-supplied `SDL3.Texture`
+"""
+# ---- canvas --------------------------------------------------------------
+
+"""
+    Rocks.CanvasContext
+
+The immediate-mode drawing surface passed to a [`Canvas`](@ref) element's
+`draw` callback. Helpers are stored as callable fields and draw in
+**canvas-local** coordinates: `(0, 0)` is the top-left of the canvas and the
+y axis points down, matching the SDL/draw axis that the rest of Rocks uses.
+`ctx.rect` is `(x, y, w, h)` of the canvas in the window's client area, so a
+caller can convert local ⇄ window coordinates.
+
+All color arguments accept the same forms as everywhere else in Rocks
+(tuples/vectors of 3–4 numbers on the 0–1 or 0–255 scale, hex strings
+`"#rgb"`/`"#rrggbb"`/`"#rrggbbaa"`, or `ColorTypes` colors). No state persists
+between frames: `draw` re-issues every primitive each redraw, so the canvas is
+recomputed from scratch like the rest of the tree.
+
+    ctx.clear([color])                     fill the whole canvas with `color` (or transparent)
+    ctx.line(x1,y1, x2,y2; color, width)   single line segment (width>1 → filled quad)
+    ctx.polyline(pts; color, width, closed)  polyline; pts = iterable of (x, y);
+                                             closed loops back to pts[1]
+    ctx.polygon(pts; color)                filled polygon (triangle fan; convex / fan-decomposed)
+    ctx.points(pts; color, size)           filled square dots
+    ctx.text(str, x, y; size, color, font) TTF text, top-left at (x, y)
+    ctx.texture(tex, x, y; w, h)           blit a caller-supplied SDL3.Texture
+"""
+struct CanvasContext
+    renderer::SDL3.Renderer
+    rect::NTuple{4,Float64}
+    clear::Function
+    line::Function
+    polyline::Function
+    polygon::Function
+    points::Function
+    text::Function
+    texture::Function
+end
+
+# Fill a convex quad with a solid colour. The colour is baked into the
+# vertices via `geometry_color`, because `RenderGeometry` ignores
+# `SetRenderDrawColor`.
+function _canvas_fill_quad(renderer, pts, color)
+    c = geometry_color(color)
+    verts = SDL3.SDL_Vertex[
+        SDL3.SDL_Vertex(SDL3.SDL_FPoint(Float32(p[1]), Float32(p[2])), c,
+                        SDL3.SDL_FPoint(0, 0)) for p in pts]
+    # The vertices arrive in ring order (p1, p2, p3, p4). Triangles must share
+    # the p1-p3 diagonal; reusing the indices (0,1,2,2,1,3) of the gradient
+    # helper (whose vertex order is TL,TR,BL,BR) would split along the wrong
+    # diagonal and leave part of the quad unpainted.
+    SDL3.RenderGeometry(renderer, verts, Cint[0, 1, 2, 0, 2, 3])
+    return nothing
+end
+
+# Build a CanvasContext for one draw pass, closing over the renderer and the
+# canvas origin so all coordinates are canvas-local.
+function make_canvas(renderer, x0, y0, w, h)
+    function canvas_line(x1, y1, x2, y2; color = nothing, width = 1.0)
+        color !== nothing && set_color(renderer, color)
+        if width <= 1.0
+            SDL3.RenderLine(renderer, x0 + x1, y0 + y1, x0 + x2, y0 + y2)
+        else
+            dx, dy = x2 - x1, y2 - y1
+            len = hypot(dx, dy)
+            if len > 0
+                nx, ny = -dy / len * width / 2, dx / len * width / 2
+                pts = [(x0 + x1 + nx, y0 + y1 + ny), (x0 + x1 - nx, y0 + y1 - ny),
+                       (x0 + x2 - nx, y0 + y2 - ny), (x0 + x2 + nx, y0 + y2 + ny)]
+                _canvas_fill_quad(renderer, pts, something(color, (0, 0, 0)))
+            end
+        end
+        return nothing
+    end
+    function canvas_clear(color = nothing)
+        (w <= 0 || h <= 0) && return
+        if color === nothing
+            SDL3.SetRenderDrawBlendMode(renderer, SDL3.SDL_BLENDMODE_BLEND)
+            SDL3.SetRenderDrawColor(renderer, 0, 0, 0, 0)
+        else
+            set_color(renderer, color)
+        end
+        SDL3.RenderFillRect(renderer,
+                            SDL3.FRect(round(Int, x0), round(Int, y0),
+                                       round(Int, w), round(Int, h)))
+        return nothing
+    end
+    function canvas_polyline(pts; color = nothing, width = 1.0, closed = false)
+        prev = nothing
+        first = nothing
+        for p in pts
+            px, py = Float64(p[1]), Float64(p[2])
+            if first === nothing
+                first = (px, py)
+            elseif prev !== nothing
+                canvas_line(prev[1], prev[2], px, py; color = color, width = width)
+            end
+            prev = (px, py)
+        end
+        # A closed loop draws the segment back to the first point — shapes
+        # from a laser document are closed by definition (PolyLine(closed)).
+        if closed && first !== nothing && prev !== nothing &&
+           (first[1] != prev[1] || first[2] != prev[2])
+            canvas_line(prev[1], prev[2], first[1], first[2];
+                        color = color, width = width)
+        end
+        return nothing
+    end
+    function canvas_polygon(pts; color = nothing)
+        color === nothing && return
+        c = geometry_color(color)
+        verts = SDL3.SDL_Vertex[
+            SDL3.SDL_Vertex(SDL3.SDL_FPoint(Float32(x0 + p[1]), Float32(y0 + p[2])), c,
+                            SDL3.SDL_FPoint(0, 0)) for p in pts]
+        n = length(verts)
+        n < 3 && return
+        idx = Cint[]
+        for i in 2:n-1
+            push!(idx, 0, Cint(i - 1), Cint(i))
+        end
+        SDL3.RenderGeometry(renderer, verts, idx)
+        return nothing
+    end
+    function canvas_points(pts; color = nothing, size = 3.0)
+        color !== nothing && set_color(renderer, color)
+        r = size / 2
+        for p in pts
+            SDL3.RenderFillRect(renderer,
+                SDL3.FRect(round(Int, x0 + p[1] - r), round(Int, y0 + p[2] - r),
+                           round(Int, size), round(Int, size)))
+        end
+        return nothing
+    end
+    function canvas_text(str, x, y; size = 16.0, color = nothing, font = nothing)
+        str == "" && return
+        path = font === nothing ? default_font() : font
+        path === nothing && return
+        f = load_font(path, max(round(Int, size), 1))
+        f == C_NULL && return
+        (r, g, b, a) = color === nothing ? (UInt8(0), UInt8(0), UInt8(0), UInt8(255)) :
+                        _to_rgba(color)
+        surface = try
+            SDL3.TTF_RenderText_Blended(f, String(str), SDL3.SDL_Color(r, g, b, a))
+        catch err
+            @warn "Rocks: canvas text failed" str exception = err
+            C_NULL
+        end
+        surface == C_NULL && return
+        texture = SDL3.CreateTextureFromSurface(renderer, surface)
+        SDL3.DestroySurface(surface)
+        texture == C_NULL && return
+        tw, th = SDL3.GetTextureSize(texture)
+        SDL3.RenderTexture(renderer, texture, nothing,
+                           SDL3.FRect(round(Int, x0 + x), round(Int, y0 + y),
+                                      round(Int, tw), round(Int, th)))
+        SDL3.DestroyTexture(texture)
+        return nothing
+    end
+    function canvas_texture(tex, x, y; w = nothing, h = nothing)
+        if w === nothing || h === nothing
+            tw, th = SDL3.GetTextureSize(tex)
+            w === nothing && (w = tw)
+            h === nothing && (h = th)
+        end
+        SDL3.RenderTexture(renderer, tex, nothing,
+                           SDL3.FRect(round(Int, x0 + x), round(Int, y0 + y),
+                                      round(Int, w), round(Int, h)))
+        return nothing
+    end
+    return CanvasContext(renderer, (x0, y0, w, h), canvas_clear, canvas_line,
+                         canvas_polyline, canvas_polygon, canvas_points,
+                         canvas_text, canvas_texture)
+end
+
+# Draw a Canvas fiber: its background (like a Box), then the user `draw`
+# callback and any children, all clipped to the canvas content box (honouring
+# any outer clip) so content never runs out of the canvas.
+function draw_canvas!(fiber, renderer)
+    draw_background!(fiber, renderer)
+    drawcb = get(fiber.props, :draw, nothing)
+    dcb = drawcb isa Function ? drawcb : nothing
+    previous = get(RENDER_CLIP, renderer, nothing)
+    x, y, w, h = fiber.rect
+    px, py = padding_of(fiber)
+    clip = SDL3.Rect(round(Int, x + px), round(Int, y + py),
+                     round(Int, max(w - 2px, 0)), round(Int, max(h - 2py, 0)))
+    previous === nothing || (clip = clip_rect(previous, clip))
+    if clip.w <= 0 || clip.h <= 0
+        return nothing
+    end
+    SDL3.SetRenderClipRect(renderer, clip)
+    RENDER_CLIP[renderer] = clip
+    try
+        if dcb !== nothing
+            ctx = make_canvas(renderer, x + px, y + py, clip.w, clip.h)
+            dcb(ctx)
+        end
+        for child in fiber.children
+            draw!(child, renderer)
+        end
+    finally
+        if previous === nothing
+            SDL3.SetRenderClipRect(renderer, nothing)
+            delete!(RENDER_CLIP, renderer)
+        else
+            SDL3.SetRenderClipRect(renderer, previous)
+            RENDER_CLIP[renderer] = previous
+        end
+    end
+    return nothing
+end
+
+
 # ---- the draw pass -------------------------------------------------------
 
 # Intersect an SDL clip rectangle with the previous one.
@@ -1138,6 +1380,10 @@ function draw!(fiber, renderer)
     end
     if fiber.kind === _SLIDER
         draw_slider!(fiber, renderer)
+        return
+    end
+    if fiber.kind === _CANVAS
+        draw_canvas!(fiber, renderer)
         return
     end
     if fiber.kind === _BOX || fiber.kind === _PRESSABLE ||

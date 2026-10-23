@@ -42,6 +42,7 @@ struct _PressableKind <: HostKind end
 struct _ImageKind <: HostKind end
 struct _SplitKind <: HostKind end
 struct _SliderKind <: HostKind end
+struct _CanvasKind <: HostKind end
 
 """
     Window
@@ -146,11 +147,67 @@ lays out and draws like a [`Box`](@ref) but also participates in pointer
 event dispatch.
 
 Props: `on_press`, `on_press_in`, `on_press_out`, `on_hover_in`,
-`on_hover_out` (all no-argument callables), `disabled`, and the styling props
-`background`, `hover_background`, `pressed_background`, `border_color`,
-`border_width` plus the layout props of [`Box`](@ref).
+`on_hover_out` (all no-argument callables), `disabled`, `cursor` (symbol:
+`:text` shows the I-beam — TextBox does this; `:grab` shows the open grab
+hand and switches to the closed grabbing hand while the pointer is held
+down; the default is the pointing hand for hovered pressables), and the
+styling props `background`, `hover_background`, `pressed_background`,
+`border_color`, `border_width` plus the layout props of [`Box`](@ref).
 """
 const Pressable = _PressableKind()
+
+"""
+    Canvas
+
+Host element kind for an arbitrary, immediately-drawn 2D region — the escape
+hatch for content that cannot be expressed as Box/Text/Image (e.g. an
+interactive vector canvas). It lays out and clips like a [`Box`](@ref) (drawing
+its `background`/`border`/`radius`), then calls its user-supplied `draw`
+callback before its children.
+
+Props:
+
+* `draw = canvas -> nothing` — called during the draw pass with a
+  [`Rocks.CanvasContext`](@ref) whose helpers draw in **canvas-local**
+  coordinates (0,0 = the canvas top-left, y-down, matching the SDL/draw
+  axis). `canvas.rect` gives `(x, y, w, h)` in window coordinates.
+* Pointer props, on the same model as [`Pressable`](@ref): `on_press(x, y)`,
+  `on_press_in(x, y, button)`, `on_press_out`, `on_drag(x, y)`,
+  `on_wheel(dx, dy, x, y)`, `disabled`. The coordinates are in **canvas-local**
+  space, so hit-testing and drawing share one transform. `on_wheel` receives the
+  raw wheel deltas (`dx`, `dy`; positive `dy` = wheel away/up) and the pointer
+  position; it takes precedence over any scrollable ancestor, so a canvas can
+  zoom inside a `ScrollView`. `cursor = :grab` shows the open grab hand on
+  hover and the closed grabbing hand while panning (default: pointing hand).
+* Plus the layout/styling props of [`Box`](@ref): `background`,
+  `border_color`/`border_width`, `radius`, `width`, `height`, `direction`,
+  `gap`, `padding`, `align`, `overflow`, `position = :absolute`, `flex`, …
+
+Because it draws into the same SDL renderer as the rest of the UI, the canvas
+composites naturally with sibling panels, respects parent clipping, and needs
+no texture round-trip — a pan/zoom drag re-issues vector primitives per frame.
+For full-resolution offscreen work (a raster Preview, exports, thumbnails),
+render to a bitmap with a drawing library (e.g. Luxor) and feed it to the
+[`Image`](@ref) element instead.
+
+```julia
+using BlazeCraft.Shapes: Rectangle, zigzag_slice
+
+function Workspace(; view = @use Observable(IdentityTransformation()))
+    canvas = use_fiber()
+    @rock Canvas(
+        @rock Pressable(@rock Text("overlay"));   # children draw on top
+        draw = ctx -> begin
+            ctx.clear((0.98, 0.98, 0.98))
+            # world → canvas-local, driven by pan/zoom Observables
+            ctx.polyline(corners(rect, view[]); color = (0.8, 0.1, 0.1))
+        end,
+        on_drag = (x, y) -> pan!(view, x, y),
+        background = nothing)
+end
+```
+"""
+const Canvas = _CanvasKind()
 
 """
     Image
@@ -202,6 +259,7 @@ const _PRESSABLE = Pressable
 const _IMAGE = Image
 const _SPLIT = Split
 const _SLIDER = Slider
+const _CANVAS = Canvas
 
 is_host(kind) = kind isa HostKind
 
