@@ -498,6 +498,10 @@ function place!(fiber, x, y)
         place_slider!(fiber, x, y)
         return
     end
+    if fiber.kind === _MOUSEAREA
+        place_mouse_area!(fiber, x, y, w, h)
+        return
+    end
     if is_host(fiber.kind)
         dir = Symbol(get(fiber.props, :direction, :column))
         gap = float(get(fiber.props, :gap, 0))
@@ -534,6 +538,30 @@ function place!(fiber, x, y)
         place_flow!(fiber, dir, gap, p, align, justify, x, y, w, h)
     end
     return
+end
+
+# MouseArea layout: a single flow child fills the area (its content box)
+# exactly, so wrapping content in a MouseArea is visually a no-op. Explicit
+# child width/height still wins. With several children the area behaves like
+# a plain Box (flex flow); absolute children keep their overlay placement.
+function place_mouse_area!(fiber, x, y, w, h)
+    kids = collect(flow_children(fiber))
+    px, py = padding_of(fiber)
+    if length(kids) == 1
+        child = kids[1]
+        fw = fixed_length(child, :width)
+        fh = fixed_length(child, :height)
+        child.measured = (something(fw, w - 2px), something(fh, h - 2py))
+        place!(child, x + px, y + py)
+    else
+        dir = Symbol(get(fiber.props, :direction, :column))
+        gap = float(get(fiber.props, :gap, 0))
+        align = Symbol(get(fiber.props, :align, :start))
+        justify = Symbol(get(fiber.props, :justify, :start))
+        place_flow!(fiber, dir, gap, (px, py), align, justify, x, y, w, h)
+    end
+    place_absolute_children!(fiber, x, y, w, h)
+    return nothing
 end
 
 # Lay out the two panes of a Split and record the handle rect for hit

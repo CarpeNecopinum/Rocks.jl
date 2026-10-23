@@ -245,12 +245,18 @@ Akin to React Native, styling is left to the user. Rocks provides primitives:
   `color`, `font`. Multi-line text uses `"\\n"`; the default font is
   auto-discovered (or set with `Rocks.set_default_font!(path)`, the
   `ROCKS_FONT` environment variable, or the `font` prop).
-* **`Pressable`** — lays out and draws like a `Box`, but participates in
-  pointer events. Props: `on_press`, `on_press_in`, `on_press_out`,
-  `on_hover_in`, `on_hover_out`, `disabled`, and `background`,
+* **`MouseArea`** — the interactive-area primitive every control is composed
+  from; `Pressable` is its legacy synonym. It renders its children like a
+  neutral `Box` with no styling of its own, and participates in pointer
+  events. Props: `on_down`, `on_up`, `on_click`, `on_move`, `on_enter`,
+  `on_leave` (all coordinates **area-local**, 0,0 = area top-left),
+  `on_wheel`, `disabled`; legacy aliases `on_press` (≈ `on_click`),
+  `on_press_in` (≈ `on_down`), `on_press_out`, `on_drag`, `on_hover_in` /
+  `on_hover_out`; and the optional styling props `background`,
   `hover_background`, `pressed_background` for state-dependent styling.
-  `cursor` picks the pointer shape while hovered — `:hand` (the default
-  pressable) or `:text`, which shows the I-beam over editable text.
+  `cursor` picks the pointer shape while hovered — `:grab` (pan surfaces,
+  shows the closed hand while pressed), `:text` (I-beam over editable text),
+  or the default pointing hand.
 * **`Image`** — a graphics file (PNG or BMP, the formats SDL3 loads
   natively). `src` is a
   path or an URL (fetched with `Downloads` and cached); `width`/`height`
@@ -267,6 +273,12 @@ Akin to React Native, styling is left to the user. Rocks provides primitives:
 * **`Slider`** — click or drag to set a value. Props: `value` (an
   `Observable`, required), `min`, `max`, `width`, `height`, `color`,
   `on_change(value)`.
+* **`Canvas`** — a 2D drawing escape hatch: lays out and clips like a `Box`
+  and calls `draw = canvas -> nothing` with a context that draws lines,
+  polylines, polygons, text … straight into the SDL renderer (canvas-local
+  coordinates). It is a pure drawing surface with no pointer handling — wrap
+  it in a `MouseArea` to make it interactive (the single child then coincides
+  with the area, so the draw and callback coordinates match one-to-one).
 
 Plus pre-styled components (Material-UI-inspired, built on the primitives;
 see also the separate Windows 7 / Winforms set, `Rocks.Enterprise`, below):

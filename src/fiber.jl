@@ -48,7 +48,7 @@ function Fiber(kind, props, parent)
 end
 
 initial_host(kind) = if kind === _PRESSABLE
-    PressState(false, false)
+    PressState(false, false) # hovered/pressed flags for styling and callbacks
 elseif kind === _SPLIT
     SplitState(0.5, false, (0.0, 0.0, 0.0, 0.0), 0.5, 0.0)
 elseif kind === _SLIDER

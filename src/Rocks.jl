@@ -56,7 +56,7 @@ include(joinpath("Material3", "Material3.jl"))
 include(joinpath("Enterprise", "Enterprise.jl"))
 
 export @rock, @use, render, quit!, screenshot,
-       Window, Box, Text, Pressable, Row, Column, ScrollView,
+       Window, Box, Text, Pressable, MouseArea, Row, Column, ScrollView,
        Image, Split, Slider, Canvas, LinearGradient,
        Button, Checkbox, Toggle, RadioGroup, DropDownMenu, Tabber, ProgressBar,
        createContext, Context,

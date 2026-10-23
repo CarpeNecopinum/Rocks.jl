@@ -1,8 +1,8 @@
 # SDL event routing: pointer events are hit-tested against the layout tree
-# and dispatched to pressables (bubbling up to the nearest `Pressable`
-# ancestor, like DOM event targets), keyboard events are delivered to the
-# window's `on_key`/`on_text_input` callbacks, and window events manage the
-# OS windows.
+# and dispatched to mouse areas (bubbling up to the nearest `MouseArea`
+# ancestor — `Pressable` is its legacy alias — like DOM event targets),
+# keyboard events are delivered to the window's `on_key`/`on_text_input`
+# callbacks, and window events manage the OS windows.
 
 "windowID -> window fiber"
 const WINDOW_BY_ID = Dict{UInt32,Fiber}()
@@ -119,8 +119,8 @@ function find_scrollable(target)
 end
 
 "Nearest fiber carrying an explicit `:on_wheel` prop, innermost first. Such a
-fiber consumes the wheel before scroll containers, so a `Canvas` can zoom
-while sitting inside a `ScrollView`."
+fiber consumes the wheel before scroll containers, so a `MouseArea` wrapping
+a canvas can zoom while sitting inside a `ScrollView`."
 function find_wheel_target(target)
     f = target
     while f !== nothing
@@ -327,8 +327,8 @@ function slider_drag_update!(fiber, x, y)
     return nothing
 end
 
-"Nearest interactive ancestor of a fiber (`Pressable` or `Canvas`), not
-crossing window boundaries."
+"Nearest interactive ancestor of a fiber (a `MouseArea`; `Pressable` is its
+legacy alias), not crossing window boundaries."
 function find_pressable(fiber)
     while fiber !== nothing
         is_pressable_kind(fiber.kind) && return fiber
@@ -338,14 +338,17 @@ function find_pressable(fiber)
     return nothing
 end
 
-"Whether a host kind responds to pointer events like a `Pressable`."
-is_pressable_kind(kind) = kind === _PRESSABLE || kind === _CANVAS
+"Whether a host kind responds to pointer events. The `Canvas` is a pure
+drawing surface and is deliberately absent: wrap it in a `MouseArea` to make
+it interactive."
+is_pressable_kind(kind) = kind === _PRESSABLE
 
-# Canvas pointer callbacks receive canvas-local coordinates (0,0 = canvas
-# top-left) so hit-testing and drawing share one transform; other pressables
-# keep their existing window-coordinate semantics.
+# Mouse callbacks receive area-local coordinates (0,0 = the interactive
+# area's top-left, sharing one transform with a wrapped canvas's draw space);
+# other kinds (e.g. TextBox-like hosts) keep the window-coordinate semantics.
 _locals(fiber, x, y) =
-    fiber.kind === _CANVAS ? (x - fiber.rect[1], y - fiber.rect[2]) : (x, y)
+    fiber.kind === _PRESSABLE ?
+        (x - fiber.rect[1], y - fiber.rect[2]) : (x, y)
 
 inside((rx, ry, rw, rh), x, y) = rx <= x < rx + rw && ry <= y < ry + rh
 
@@ -441,8 +444,9 @@ function update_cursor()
         GRABBING_CURSOR[] == C_NULL && (GRABBING_CURSOR[] = HAND_CURSOR[])
     end
     cursor = ARROW_CURSOR[]
-    # An actively-pressed fiber that pans (`cursor = :grab`, e.g. a Canvas)
-    # shows the closed grabbing hand wherever the pointer is until release.
+    # An actively-pressed fiber that pans (`cursor = :grab`, e.g. a MouseArea
+    # over a canvas) shows the closed grabbing hand wherever the pointer is
+    # until release.
     grabbing_now = any(get(p.props, :cursor, nothing) === :grab
                        for (_, p) in ACTIVE_PRESS)
     if grabbing_now
@@ -484,10 +488,12 @@ function set_hover!(window_id, pressable)
     if current !== nothing && current.mounted && current.host isa PressState
         current.host.hovered = false
         callback(current.props, :on_hover_out)
+        callback(current.props, :on_leave)
     end
     if pressable !== nothing && pressable.mounted && pressable.host isa PressState
         pressable.host.hovered = true
         callback(pressable.props, :on_hover_in)
+        callback(pressable.props, :on_enter)
     end
     if pressable === nothing
         delete!(HOVERED, window_id)
@@ -593,6 +599,7 @@ function dispatch_event!(event::SDL3.Event)
             pressable.host isa PressState && (pressable.host.pressed = true)
             lx, ly = _locals(pressable, mx, my)
             callback_press!(pressable.props, :on_press_in, lx, ly, button)
+            callback_press!(pressable.props, :on_down, lx, ly, button)
             mark_window_draw!(wid)
             update_cursor()
         end
@@ -611,9 +618,15 @@ function dispatch_event!(event::SDL3.Event)
         pressable.host isa PressState && (pressable.host.pressed = false)
         callback(pressable.props, :on_press_out)
         lx, ly = _locals(pressable, mx, my)
+        # `on_up` fires on the area the press started in, even when the
+        # pointer has left it (a released-elsewhere up still ends a drag).
+        pressable.mounted && is_pressable_kind(pressable.kind) &&
+            !Bool(get(pressable.props, :disabled, false)) &&
+            callback_press!(pressable.props, :on_up, lx, ly, button)
         if pressable.mounted && is_pressable_kind(pressable.kind) &&
            inside(pressable.rect, mx, my) && !Bool(get(pressable.props, :disabled, false))
             callback_press!(pressable.props, :on_press, lx, ly, button)
+            callback_press!(pressable.props, :on_click, lx, ly, button)
         end
         mark_window_draw!(wid)
         update_cursor()
@@ -629,23 +642,27 @@ function dispatch_event!(event::SDL3.Event)
         fiber = get(WINDOW_BY_ID, wid, nothing)
         fiber === nothing && (set_hover!(wid, nothing); return)
         # Holding the pointer down over a text field and dragging extends its
-        # selection (the field's `on_drag` sees pointer positions).
-        pressable = get(ACTIVE_PRESS, (wid, UInt8(1)), nothing)
-        if pressable !== nothing && haskey(pressable.props, :on_drag)
-            f = pressable.props[:on_drag]
-            if f isa Function
-                lx, ly = _locals(pressable, mx, my)
-                try
-                    f(lx, ly)
-                catch err
-                    @warn "Rocks: callback :on_drag failed" exception =
-                        (err, catch_backtrace())
-                end
-            end
-            mark_window_draw!(wid)
+        # selection (the field's `on_drag` sees pointer positions); a
+        # `MouseArea` with `on_move` gets the same captured moves, so pan/drag
+        # surfaces keep tracking even when the pointer leaves the area.
+        pressed = get(ACTIVE_PRESS, (wid, UInt8(1)), nothing)
+        if pressed !== nothing
+            lx, ly = _locals(pressed, mx, my)
+            callback_press!(pressed.props, :on_move, lx, ly)
+            callback_press!(pressed.props, :on_drag, lx, ly)
+            (haskey(pressed.props, :on_move) || haskey(pressed.props, :on_drag)) &&
+                mark_window_draw!(wid)
         end
         target = hit_test(fiber, mx, my)
-        set_hover!(wid, find_pressable(target))
+        hovered = find_pressable(target)
+        set_hover!(wid, hovered)
+        # Plain hover motion: the innermost mouse area under the pointer sees
+        # moves that are not already delivered through the press capture.
+        if hovered !== nothing && hovered !== pressed &&
+           haskey(hovered.props, :on_move)
+            lx, ly = _locals(hovered, mx, my)
+            callback_press!(hovered.props, :on_move, lx, ly)
+        end
     elseif ty == SDL3.SDL_EVENT_MOUSE_WHEEL
         wev = SDL3.as_mouse_wheel(event)
         wid = wev.windowID
@@ -662,9 +679,9 @@ function dispatch_event!(event::SDL3.Event)
             dx, dy = -dx, -dy
         end
         target = hit_test(fiber, x, y)
-        # A fiber with an explicit `:on_wheel` prop (e.g. a Canvas that zooms)
-        # consumes the wheel before scroll containers: the innermost handler
-        # wins.
+        # A fiber with an explicit `:on_wheel` prop (e.g. a MouseArea that
+        # zooms) consumes the wheel before scroll containers: the innermost
+        # handler wins.
         wheel = find_wheel_target(target)
         if wheel !== nothing && !Bool(get(wheel.props, :disabled, false))
             lx, ly = _locals(wheel, x, y)

@@ -278,6 +278,13 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
         rf === nothing ? 0.0 : max(get(rf.measured, 1, 0.0), 0.0)
     end
 
+    # Pointer callbacks receive coordinates local to the field area; the
+    # caret math and the popup menu both need owner-window coordinates.
+    field_offset() = begin
+        f = field_fiber()
+        f === nothing ? (0.0, 0.0) : (f.rect[1], f.rect[2])
+    end
+
     # Character boundary the pointer lands at, based on the text row geometry.
     caret_at(x) = begin
         rf = row_fiber()
@@ -349,33 +356,37 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
                 nothing
             end,
             :on_press_in => disabled ? () -> nothing : (px, py, btn) -> begin
+                ox, oy = field_offset()
+                wx, wy = px + ox, py + oy
                 if btn == 3
                     # Right-click opens the edit menu at the pointer (the
                     # caret and selection stay as they are). The menu opens
                     # as its own borderless OS window, a popup of the owner
                     # window, so it is anchored at the pointer in the owner
                     # window's client area.
-                    menu_x[] = px
-                    menu_y[] = py + 2.0
+                    menu_x[] = wx
+                    menu_y[] = wy + 2.0
                     menu_open[] = true
                     return nothing
                 end
                 # Place the caret at the pressed character boundary; the row
                 # rect already covers border and padding.
-                pos = caret_at(px)
+                pos = caret_at(wx)
                 cur[] = anchor[] = pos
                 return nothing
             end,
             :on_drag => disabled ? nothing : (px, py) -> begin
                 # Hold-and-drag extends the selection from the press point.
-                cur[] = caret_at(px)
+                ox, _ = field_offset()
+                cur[] = caret_at(px + ox)
                 return nothing
             end,
             :on_press => disabled ? () -> nothing : (px, py, btn) -> begin
                 btn == 3 && return nothing
                 # Left release: the drag selection snaps to the release
                 # position; a click without a drag collapses the anchor.
-                cur[] = caret_at(px)
+                ox, _ = field_offset()
+                cur[] = caret_at(px + ox)
                 cur[] == anchor[] && (anchor[] = -1)
                 return nothing
             end,

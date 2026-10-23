@@ -828,33 +828,35 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         seen = Ref{Any}(nothing)
         function App()
             @rock Window(
-                @rock Canvas(;
-                    draw = _ -> nothing,
+                @rock MouseArea(
+                    @rock Canvas(; draw = _ -> nothing);
                     on_wheel = (dx, dy, x, y) -> seen[] = (dx, dy, x, y),
                     flex = 1, fill = true);
                 title = "wheel", width = 200, height = 100)
         end
         with_tree(App) do root
             w = sync_windows!(root)[1]
-            canvas = w.children[1]
-            @test canvas.kind === Canvas
+            area = w.children[1]
+            @test area.kind === MouseArea
+            @test area.children[1].kind === Canvas
             # `dy = -1` is one wheel notch; the callback sees the raw delta and
-            # the pointer in canvas-local coordinates
+            # the pointer in area-local coordinates (the canvas underneath
+            # share the same rect, so these are canvas-local too)
             push_wheel!(w, 120, 70; dx = 0, dy = -1)
             drain_events!()
             @test seen[] == (0.0, -1.0, 120.0, 70.0)
         end
 
-        # An `on_wheel` canvas zooms inside a scroll view instead of scrolling
+        # An `on_wheel` area zooms inside a scroll view instead of scrolling
         # it; wheel over a sibling without the prop scrolls the view as usual.
         zooms = Ref(0)
         function BothApp()
             @rock Window(
                 @rock ScrollView(
-                    @rock Canvas(;
-                        draw = _ -> nothing,
-                        on_wheel = (dx, dy, x, y) -> zooms[] += 1,
-                        width = 200, height = 50),
+                    @rock MouseArea(
+                        @rock Canvas(; draw = _ -> nothing,
+                                     width = 200, height = 50);
+                        on_wheel = (dx, dy, x, y) -> zooms[] += 1),
                     @rock Box(; width = 200, height = 2_000,
                               background = (0.2, 0.7, 0.3));
                     position = :absolute, fill = true, scroll_step = 40);
@@ -871,6 +873,94 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             drain_events!()
             @test zooms[] == 1
             @test sv.host.offset == 40
+        end
+    end
+
+    @testset "mouse area" begin
+        downs = Any[]
+        ups = Any[]
+        clicks = Any[]
+        moves = Any[]
+        enters = Ref(0)
+        leaves = Ref(0)
+        legacy_press = Ref(0)
+        wheels = Any[]
+        function App()
+            @rock Window(
+                @rock MouseArea(;
+                    position = :absolute, x = 50, y = 40,
+                    width = 100, height = 60,
+                    on_down = (x, y, b) -> push!(downs, (x, y, b)),
+                    on_up = (x, y, b) -> push!(ups, (x, y, b)),
+                    on_click = (x, y, b) -> push!(clicks, (x, y, b)),
+                    on_move = (x, y) -> push!(moves, (x, y)),
+                    on_enter = () -> (enters[] += 1; nothing),
+                    on_leave = () -> (leaves[] += 1; nothing),
+                    on_press = () -> (legacy_press[] += 1; nothing),
+                    on_wheel = (dx, dy, x, y) -> push!(wheels, (dx, dy, x, y)));
+                title = "mouse area", width = 300, height = 200)
+        end
+        with_tree(App) do root
+            w = sync_windows!(root)[1]
+            area = w.children[1]
+            @test area.kind === MouseArea
+            @test fmt(area.rect) == "(50, 40, 100, 60)"
+
+            # Pointer callbacks receive area-local coordinates. A press and
+            # a release inside is a click; releasing outside only reports
+            # `on_up` (the legacy `on_press` stays click-only).
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, 100, 60)
+            drain_events!()
+            @test downs == [(50.0, 20.0, 1)]
+            @test area.host.pressed
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, 190, 150)
+            drain_events!()
+            @test ups == [(140.0, 110.0, 1)]
+            @test clicks == []
+            @test !area.host.pressed
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, 100, 60)
+            drain_events!()
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, 100, 60)
+            drain_events!()
+            @test ups == [(140.0, 110.0, 1), (50.0, 20.0, 1)]
+            @test clicks == [(50.0, 20.0, 1)]
+            @test legacy_press[] == 1
+
+            # Hover motion: enter once, then moves; leaving stops the moves.
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_MOTION, 100, 60)
+            drain_events!()
+            @test enters[] == 1
+            @test moves == [(50.0, 20.0)]
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_MOTION, 140, 70)
+            drain_events!()
+            @test moves == [(50.0, 20.0), (90.0, 30.0)]
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_MOTION, 290, 190)
+            drain_events!()
+            @test leaves[] == 1
+
+            # Press capture: while the button is held the area keeps seeing
+            # moves (even outside), then stops after the release.
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, 60, 45)
+            drain_events!()
+            n_before = length(moves)
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_MOTION, 190, 150)
+            drain_events!()
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_MOTION, 290, 190)
+            drain_events!()
+            @test moves[n_before+1:end] == [(140.0, 110.0), (240.0, 150.0)]
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, 290, 190)
+            drain_events!()
+            @test ups[end] == (240.0, 150.0, 1)
+            @test clicks == [(50.0, 20.0, 1)]  # release outside → no click
+            n_moves = length(moves)
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_MOTION, 290, 190)
+            drain_events!()
+            @test length(moves) == n_moves
+
+            # Wheel over the area: raw deltas, area-local coordinates.
+            push_wheel!(w, 100, 60; dx = 0, dy = -1)
+            drain_events!()
+            @test wheels == [(0.0, -1.0, 50.0, 20.0)]
         end
     end
 

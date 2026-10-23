@@ -14,8 +14,10 @@
 # writes it (the canvas callbacks and the control panel) — created with `@use`
 # and seeded from keyword arguments, so a test can vary it without reaching
 # into module state (`render(App; initial_zoom = 40, ...)`, see below). Module
-# scope only holds constants (scene geometry, layout constants). The app
-# subscribes to the view observables via `@use`, which is what makes the
+# scope only holds constants (scene geometry, layout constants). Auxiliary
+# state that renders nothing (the drag gate, the pan-at-drag-start store) is
+# silent `@use Ref(...)` state: hook-stable identity, no re-renders on writes.
+# The app subscribes to the view observables via `@use`, which is what makes the
 # panel's labels update live while dragging/zooming (a plain `zoom[]` read in a
 # component body does NOT subscribe anything); the draw callbacks read the same
 # observables lazily at draw time.
@@ -28,7 +30,7 @@
 # and then removed for visual clarity.)
 
 using Rocks
-import Rocks: Canvas, Text   # Text: disambiguate from Base.Text
+import Rocks: Canvas, MouseArea, Text   # Text: disambiguate from Base.Text
 
 # Canvas-region constants of this window (window 720×520, right column 220).
 const CANVAS_W = 500.0
@@ -75,9 +77,14 @@ function draw_workspace(ctx, zoom, panx, pany)
 end
 
 function App(; initial_zoom = 4.0, initial_panx = 40.0, initial_pany = 210.0)
-    # pan-at-drag-start store, per app instance (hooks-idiomatic state)
-    panx0 = @use Observable(0.0)
-    pany0 = @use Observable(0.0)
+    # `@use Ref(...)` is silent hook state (React-style `useRef`): the Ref is
+    # created once per component instance (the hook keeps it across
+    # re-renders, so callbacks that re-runs recreate still share it) and
+    # mutating it NEVER re-renders.
+    panx0 = @use Ref(0.0)
+    pany0 = @use Ref(0.0)
+    # `dragging` gates `on_move`, which also fires for plain hover motion
+    dragging = @use Ref(false)
 
     # The view state: owned by the app (nearest common ancestor of the canvas
     # callbacks and the panel), seeded from the keyword arguments. `@use` also
@@ -112,20 +119,29 @@ function App(; initial_zoom = 4.0, initial_panx = 40.0, initial_pany = 210.0)
 
     @rock Window(
         @rock Row(
-            @rock Canvas(
-                draw = (ctx) -> draw_workspace(ctx, zoom[], panx[], pany[]),
-                on_press_in = (x, y, _) -> begin
+            # The canvas is a pure drawing surface; the MouseArea wrapper
+            # makes it interactive. With a single child the two coincide
+            # exactly, so the area-local callback coordinates equal the
+            # canvas-local draw coordinates. `on_move` also fires on plain
+            # hover, so the pan gate is an explicit dragging flag.
+            @rock MouseArea(
+                @rock Canvas(
+                    draw = (ctx) -> draw_workspace(ctx, zoom[], panx[], pany[]),
+                    background = (0.95, 0.95, 0.95));
+                on_down = (x, y, _) -> begin
                     panx0[] = panx[] - x
                     pany0[] = pany[] - y
+                    dragging[] = true
                 end,
-                on_drag = (x, y) -> begin
+                on_move = (x, y) -> begin
+                    dragging[] || return nothing
                     panx[] = panx0[] + x
                     pany[] = pany0[] + y
                 end,
+                on_up = (_, _, _) -> (dragging[] = false),
                 on_wheel = (dx, dy, x, y) -> zoom_at(x, y, 1.15^dy),
                 cursor = :grab,
-                flex = 1, fill = true,
-                background = (0.95, 0.95, 0.95)),
+                flex = 1, fill = true),
             @rock Column(
                 @rock Box(
                     @rock Text("View"; size = 15, color = (0.15, 0.15, 0.18)),

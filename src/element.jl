@@ -38,7 +38,7 @@ struct _WindowKind <: HostKind end
 struct _BoxKind <: HostKind end
 struct _ScrollViewKind <: HostKind end
 struct _TextKind <: HostKind end
-struct _PressableKind <: HostKind end
+struct _MouseAreaKind <: HostKind end
 struct _ImageKind <: HostKind end
 struct _SplitKind <: HostKind end
 struct _SliderKind <: HostKind end
@@ -140,21 +140,67 @@ font; defaults to the auto-discovered system font, see
 const Text = _TextKind()
 
 """
-    Pressable
+    MouseArea
 
-Host element kind for pressable areas (React-Native style). A `Pressable`
-lays out and draws like a [`Box`](@ref) but also participates in pointer
-event dispatch.
+Host element kind for mouse interaction — the single primitive every
+interactive control is composed from. A `MouseArea` lays out like a neutral
+[`Box`](@ref): it renders its children (a single child fills the area exactly)
+but contributes no styling of its own — no background, border or padding
+unless you explicitly pass styling props. It never alters the flow of the
+tree beyond occupying the slot its children measure to, so wrapping content
+in `MouseArea(...)` is visually a no-op; it only makes the subtree
+interactive.
 
-Props: `on_press`, `on_press_in`, `on_press_out`, `on_hover_in`,
-`on_hover_out` (all no-argument callables), `disabled`, `cursor` (symbol:
-`:text` shows the I-beam — TextBox does this; `:grab` shows the open grab
-hand and switches to the closed grabbing hand while the pointer is held
-down; the default is the pointing hand for hovered pressables), and the
-styling props `background`, `hover_background`, `pressed_background`,
-`border_color`, `border_width` plus the layout props of [`Box`](@ref).
+Props:
+
+* Mouse callbacks — all coordinates are **area-local** (0,0 = area top-left;
+  a single-child wrapper over a [`Canvas`](@ref) therefore shares the
+  canvas's draw coordinates):
+  * `on_down(x, y, button)` — a button was pressed in the area (left is
+    button 1). While the button is held, the area captures the pointer: it
+    keeps receiving motion even outside its bounds (drag tracking) until the
+    matching release.
+  * `on_up(x, y, button)` — the pressed button was released (fires on the
+    area the press started in, whether or not the pointer is still inside).
+  * `on_click(x, y, button)` — the press was released inside the area.
+  * `on_move(x, y)` — the pointer moved over the area while not pressed, and
+    moves during a press capture (a pan/drag surface uses this).
+  * `on_enter` / `on_leave` — the pointer entered/left the area (no
+    arguments).
+  * `on_wheel(dx, dy, x, y)` — raw wheel deltas; takes precedence over any
+    scrollable ancestor, so a wrapped [`Canvas`](@ref) can zoom inside a
+    `ScrollView`.
+* `disabled = false` — suppresses all mouse callbacks when true.
+* `cursor` — visible pointer shape while hovered: `:grab` (open hand, closed
+  while pressed — a pan surface), `:text` (I-beam, what `TextBox` uses), or
+  the default pointing hand.
+* Legacy aliases kept for the existing [`Pressable`](@ref) API —
+  `on_press_in` (≈ `on_down`), `on_press` (≈ `on_click`), `on_press_out`,
+  `on_drag(x, y)` (called with area-local coordinates while the pointer is
+  held), `on_hover_in`/`on_hover_out` (≈ `on_enter`/`on_leave`).
+* Opt-in styling props of [`Box`](@ref) — `background`, `hover_background`,
+  `pressed_background`, `border_color`/`border_width`, `bevel`, `radius`,
+  `padding`, `direction`, `gap`, `align`, `overflow`, `flex`, `width`,
+  `height`, … Pre-styled controls like `Button` set these so the area doubles
+  as the visible chip; a bare `MouseArea` stays invisible.
+
+`Pressable` is a legacy synonym of `MouseArea` (the old React-Native-flavored
+name); prefer `MouseArea` in new code.
+
+```julia
+# A canvas workspace that pans and zooms:
+@rock MouseArea(
+    @rock Canvas(draw = draw_scene, background = (0.97, 0.97, 0.97));
+    on_down = (x, y, b) -> (start = (x, y)),
+    on_move = (x, y) -> pan_view!(x, y),
+    on_wheel = (dx, dy, x, y) -> zoom_at!(x, y, dy),
+    cursor = :grab)
+```
 """
-const Pressable = _PressableKind()
+const MouseArea = _MouseAreaKind()
+
+"Deprecated synonym for [`MouseArea`](@ref)."
+const Pressable = MouseArea
 
 """
     Canvas
@@ -171,39 +217,51 @@ Props:
   [`Rocks.CanvasContext`](@ref) whose helpers draw in **canvas-local**
   coordinates (0,0 = the canvas top-left, y-down, matching the SDL/draw
   axis). `canvas.rect` gives `(x, y, w, h)` in window coordinates.
-* Pointer props, on the same model as [`Pressable`](@ref): `on_press(x, y)`,
-  `on_press_in(x, y, button)`, `on_press_out`, `on_drag(x, y)`,
-  `on_wheel(dx, dy, x, y)`, `disabled`. The coordinates are in **canvas-local**
-  space, so hit-testing and drawing share one transform. `on_wheel` receives the
-  raw wheel deltas (`dx`, `dy`; positive `dy` = wheel away/up) and the pointer
-  position; it takes precedence over any scrollable ancestor, so a canvas can
-  zoom inside a `ScrollView`. `cursor = :grab` shows the open grab hand on
-  hover and the closed grabbing hand while panning (default: pointing hand).
 * Plus the layout/styling props of [`Box`](@ref): `background`,
   `border_color`/`border_width`, `radius`, `width`, `height`, `direction`,
   `gap`, `padding`, `align`, `overflow`, `position = :absolute`, `flex`, …
 
-Because it draws into the same SDL renderer as the rest of the UI, the canvas
-composites naturally with sibling panels, respects parent clipping, and needs
-no texture round-trip — a pan/zoom drag re-issues vector primitives per frame.
-For full-resolution offscreen work (a raster Preview, exports, thumbnails),
-render to a bitmap with a drawing library (e.g. Luxor) and feed it to the
-[`Image`](@ref) element instead.
+The canvas is a pure drawing surface: it takes no part in pointer event
+dispatch. Make it interactive by wrapping it in a [`MouseArea`](@ref) — with
+a single child, the canvas and the area coincide exactly, so the callbacks'
+**area-local** coordinates match the canvas's **canvas-local** draw
+coordinates (a pan/zoom handler reuses the same transform as the `draw`
+callback):
+
+The canvas composites naturally with sibling panels, respects parent
+clipping, and needs no texture round-trip — a pan/zoom drag re-issues vector
+primitives per frame. For full-resolution offscreen work (a raster Preview,
+exports, thumbnails), render to a bitmap with a drawing library (e.g. Luxor)
+and feed it to the [`Image`](@ref) element instead.
 
 ```julia
-using BlazeCraft.Shapes: Rectangle, zigzag_slice
-
-function Workspace(; view = @use Observable(IdentityTransformation()))
-    canvas = use_fiber()
-    @rock Canvas(
-        @rock Pressable(@rock Text("overlay"));   # children draw on top
-        draw = ctx -> begin
-            ctx.clear((0.98, 0.98, 0.98))
-            # world → canvas-local, driven by pan/zoom Observables
-            ctx.polyline(corners(rect, view[]); color = (0.8, 0.1, 0.1))
+# A pan/zoom workspace: a closed shape drawn onto the canvas each frame, its
+# world→screen transform driven by state that the MouseArea's callbacks update.
+function Workspace()
+    zoom = @use Observable(1.0)               # view state (renders again)
+    pan = @use Observable((40.0, 210.0))      # world → screen offset, px
+    start = @use Ref((0.0, 0.0))              # silent hook state (useRef)
+    dragging = @use Ref(false)
+    shape = [(0, 0), (60, 0), (60, 40), (0, 40)]          # world units, y-up
+    local_pt(p) = (p[1]*zoom[] + pan[][1], pan[][2] - p[2]*zoom[])  # y-down
+    @rock MouseArea(                          # supplies pan/zoom/cursor
+        @rock Canvas(                         # the pure drawing surface
+            draw = ctx -> begin
+                ctx.clear((0.98, 0.98, 0.98))
+                ctx.polyline(local_pt.(shape); color = (0.8, 0.1, 0.1),
+                             closed = true)
+            end,
+            background = nothing);            # children draw on top
+        on_down = (x, y, _) -> begin
+            start[] = (pan[][1] - x, pan[][2] - y)
+            dragging[] = true
         end,
-        on_drag = (x, y) -> pan!(view, x, y),
-        background = nothing)
+        on_move = (x, y) -> begin
+            dragging[] && (pan[] = (start[][1] + x, start[][2] + y))
+            nothing
+        end,
+        on_up = (_, _, _) -> (dragging[] = false),
+        cursor = :grab)
 end
 ```
 """
@@ -255,7 +313,8 @@ const _WINDOW = Window
 const _BOX = Box
 const _SCROLLVIEW = ScrollView
 const _TEXT = Text
-const _PRESSABLE = Pressable
+const _PRESSABLE = Pressable          # legacy alias (=== MouseArea)
+const _MOUSEAREA = MouseArea
 const _IMAGE = Image
 const _SPLIT = Split
 const _SLIDER = Slider
