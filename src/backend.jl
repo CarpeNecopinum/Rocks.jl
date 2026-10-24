@@ -211,6 +211,16 @@ function shutdown_backend()
     empty!(IMAGE_SURFACES)
     SDL3.TTF_Quit()
     SDL3.Quit()
+    # SDL_QuitMouse destroyed the cached system cursors: forget the dangling
+    # pointers so the next session re-creates them (SDL 3.4's SDL_SetCursor
+    # validates the cursor against the current mouse and rejects stale ones
+    # with "Cursor not associated with the current mouse").
+    HAND_CURSOR[] = C_NULL
+    ARROW_CURSOR[] = C_NULL
+    TEXT_CURSOR[] = C_NULL
+    GRAB_CURSOR[] = C_NULL
+    GRABBING_CURSOR[] = C_NULL
+    CURSORS_UNAVAILABLE[] = false
     BACKEND_INITIALIZED[] = false
     return nothing
 end

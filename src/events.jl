@@ -30,8 +30,10 @@ const GRABBING_CURSOR = Ref{SDL3.Cursor}(C_NULL)  # closed hand (panning)
 # binding knows; the enum is ABI-stable (new values are appended, never
 # renumbered), so they are requested directly and the code falls back to the
 # pointing hand when the native library predates them.
-const _SDL_SYSTEM_CURSOR_GRAB = Int32(21)
-const _SDL_SYSTEM_CURSOR_GRABBING = Int32(22)
+# SDL 3.4 dropped the dedicated grab cursors (SDL_SYSTEM_CURSOR_COUNT is 20
+# and ids beyond it corrupt SDL's cursor list); pan uses the move cursor.
+const _SDL_SYSTEM_CURSOR_GRAB = SDL3.SDL_SYSTEM_CURSOR_MOVE
+const _SDL_SYSTEM_CURSOR_GRABBING = SDL3.SDL_SYSTEM_CURSOR_MOVE
 
 # Set when the video driver has no system cursors (headless drivers).
 const CURSORS_UNAVAILABLE = Ref(false)
@@ -469,7 +471,16 @@ function update_cursor()
         cursor = wants_text ? TEXT_CURSOR[] :
                  wants_grab ? GRAB_CURSOR[] : HAND_CURSOR[]
     end
-    cursor == C_NULL || SDL3.SetCursor(cursor)
+    cursor == C_NULL && return nothing
+    try
+        SDL3.SetCursor(cursor)
+    catch err
+        # A cosmetic failure (e.g. a stale cursor after a re-init) must never
+        # kill the event loop: give up on custom cursors for this session and
+        # let the window manager's pointer stay.
+        CURSORS_UNAVAILABLE[] = true
+        @warn "Rocks: cursor could not be set; staying with the system pointer" exception = err
+    end
     return nothing
 end
 
