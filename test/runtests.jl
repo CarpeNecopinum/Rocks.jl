@@ -964,6 +964,96 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         end
     end
 
+    @testset "mouse area layout" begin
+        # Styled controls (Buttons, tab headers, …) are MouseAreas like any
+        # other: their single streamed label keeps flex-flow placement, so a
+        # center-aligned control centers its text vertically.
+        function CenteredApp()
+            @rock Window(
+                @rock Pressable(
+                    @rock Text("mid");
+                    align = :center, justify = :center, direction = :row,
+                    height = 40, padding_x = 16);
+                title = "centered", width = 200, height = 80)
+        end
+        with_tree(CenteredApp) do root
+            w = sync_windows!(root)[1]
+            p = w.children[1]
+            t = p.children[1]
+            offset = (t.rect[2] + t.rect[4] / 2) - (p.rect[2] + p.rect[4] / 2)
+            @test abs(offset) <= 1.0
+        end
+
+        # The wrapper use: a single `fill = true` child fills the MouseArea
+        # exactly, no-op visually.
+        function FillWrapApp()
+            @rock Window(
+                @rock Row(
+                    @rock MouseArea(
+                        @rock Canvas(draw = _ -> nothing, fill = true);
+                        flex = 1, fill = true);
+                    position = :absolute, fill = true);
+                title = "wrap", width = 200, height = 80)
+        end
+        with_tree(FillWrapApp) do root
+            w = sync_windows!(root)[1]
+            row = w.children[1]
+            box = row.children[1]      # Row is a component; its output Box
+            area = box.children[1]
+            canvas = area.children[1]
+            @test area.kind === MouseArea && canvas.kind === Canvas
+            @test fmt(canvas.rect) == fmt(area.rect)
+        end
+
+        # …while a non-fill single child keeps its natural flow size.
+        function FlowWrapApp()
+            @rock Window(
+                @rock MouseArea(
+                    @rock Text("hi"; size = 20);
+                    height = 80);
+                title = "flow", width = 200, height = 80)
+        end
+        with_tree(FlowWrapApp) do root
+            w = sync_windows!(root)[1]
+            area = w.children[1]
+            t = area.children[1]
+            @test area.rect[4] == 80
+            @test t.rect[4] < area.rect[4] # no vertical stretching
+        end
+    end
+
+    @testset "component overflow hit testing" begin
+        # A component fiber transparently forwards hit tests into its output
+        # subtree: pointer events in a popup that overflows the component's
+        # own rect must reach the popup's pressables (this is where every
+        # dropdown lives).
+        clicks = Ref(0)
+        function Popup()
+            @rock Box(
+                @rock Pressable(
+                    @rock Text("entry");
+                    position = :absolute, x = 0, y = 30,
+                    width = 60, height = 20,
+                    on_press = () -> (clicks[] += 1));
+                overflow = :visible, width = 60, height = 20)
+        end
+        function OverflowApp()
+            @rock Window(@rock Popup();
+                         title = "overflow", width = 200, height = 150)
+        end
+        with_tree(OverflowApp) do root
+            w = sync_windows!(root)[1]
+            entry = first(collect_kind(w, Pressable))
+            ex, ey = (entry.rect[1] + entry.rect[3] / 2,
+                      entry.rect[2] + entry.rect[4] / 2)
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, ex, ey)
+            drain_events!()
+            push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, ex, ey)
+            drain_events!()
+            @test clicks[] == 1
+        end
+    end
+
     @testset "headless run" begin
         renders = Ref(0)
         ticks = Ref(0)
@@ -1990,6 +2080,89 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 item.props[:on_press]()
                 @test combo[] == 2
                 @test changed[] == 1
+            end
+        end
+
+        @testset "combo box pointer clicks" begin
+            # The dropdown popup overflows the ComboBox's own rect, so real
+            # pointer clicks must reach it through the component fiber's
+            # output (hit-test forwarding): open via the arrow, then select
+            # an entry.
+            combo = Observable(1)
+            changes = Ref(0)
+            function ComboClickApp()
+                @rock Window(
+                    @rock E.ComboBox(items = ["one", "two"]; selected = combo,
+                                     on_change = () -> changes[] += 1);
+                    title = "combo clicks", width = 300, height = 240)
+            end
+            with_tree(ComboClickApp) do root
+                w = sync_windows!(root)[1]
+                combo_component = find_kind(root, E.ComboBox)
+                arrow = first(p for p in collect_kind(combo_component, Pressable)
+                              if p.rect[3] < 20)
+                ax, ay = (arrow.rect[1] + arrow.rect[3] / 2,
+                          arrow.rect[2] + arrow.rect[4] / 2)
+                push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, ax, ay)
+                drain_events!()
+                push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, ax, ay)
+                drain_events!()
+                Rocks.perform_render!(root)
+                sync_windows!(root)
+                combo_component = find_kind(root, E.ComboBox)
+                # Both entries are 156 wide; the second one ("two") makes the
+                # selection assertion meaningful. They live in the popup's
+                # own borderless window now, so the click is pushed on the
+                # entry fiber itself (resolved to the popup window).
+                entries = [p for p in collect_kind(combo_component, Pressable)
+                           if p.rect[3] == 156]
+                @test length(entries) == 2
+                popup_window = entries[1]
+                while !Rocks.is_window(popup_window)
+                    popup_window = popup_window.parent
+                end
+                @test popup_window !== w
+                ex, ey = (entries[2].rect[1] + entries[2].rect[3] / 2,
+                          entries[2].rect[2] + entries[2].rect[4] / 2)
+                push_mouse!(popup_window, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, ex, ey)
+                drain_events!()
+                push_mouse!(popup_window, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, ex, ey)
+                drain_events!()
+                @test combo[] == 2
+                @test changes[] == 1
+            end
+        end
+
+        @testset "combo box long list popup" begin
+            # A long options list caps the popup height and scrolls inside
+            # it instead of growing past the screen.
+            combo = Observable(1)
+            items = ["item $i" for i in 1:30]
+            function ComboLongApp()
+                @rock Window(
+                    @rock E.ComboBox(items = items; selected = combo,
+                                     width = 200);
+                    title = "combo long", width = 400, height = 220)
+            end
+            with_tree(ComboLongApp) do root
+                w = sync_windows!(root)[1]
+                combo_component = find_kind(root, E.ComboBox)
+                arrow = first(p for p in collect_kind(combo_component, Pressable)
+                              if p.rect[3] < 20)
+                ax, ay = (arrow.rect[1] + arrow.rect[3] / 2,
+                          arrow.rect[2] + arrow.rect[4] / 2)
+                push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, ax, ay)
+                drain_events!()
+                push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, ax, ay)
+                drain_events!()
+                Rocks.perform_render!(root)
+                windows = sync_windows!(root)
+                popup = windows[findfirst(x -> Bool(get(x.props, :popup, false)),
+                                          windows)]
+                @test popup.rect == (0, 0, 200, 300)
+                scrollers = [c for c in collect_kind(popup, Box)
+                             if get(c.props, :scroll, false)]
+                @test length(scrollers) == 1
             end
         end
 

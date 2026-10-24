@@ -540,14 +540,17 @@ function place!(fiber, x, y)
     return
 end
 
-# MouseArea layout: a single flow child fills the area (its content box)
-# exactly, so wrapping content in a MouseArea is visually a no-op. Explicit
-# child width/height still wins. With several children the area behaves like
-# a plain Box (flex flow); absolute children keep their overlay placement.
+# MouseArea layout. Styled controls (Buttons, MenuItem, tab headers, …) are
+# MouseAreas like any other, so the default path is the normal Box flex flow,
+# honors `align`/`justify`/`gap`. The one special case is the *wrapper* use:
+# a single `fill = true` child (the Canvas workspace pattern) receives the
+# area's content box exactly, so `MouseArea(Canvas(fill = true))` is visually
+# a no-op and callback coordinates coincide with the child's draw coordinates.
+# Absolute children keep their overlay placement either way.
 function place_mouse_area!(fiber, x, y, w, h)
     kids = collect(flow_children(fiber))
     px, py = padding_of(fiber)
-    if length(kids) == 1
+    if length(kids) == 1 && get(kids[1].props, :fill, false) === true
         child = kids[1]
         fw = fixed_length(child, :width)
         fh = fixed_length(child, :height)

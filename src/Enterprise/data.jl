@@ -292,9 +292,12 @@ end
     Enterprise.ComboBox(; items, selected, on_change, width = 160,
                         editable = false)
 
-A sunken combo field with a raised drop button and a popup item list.
-`selected` is an `Observable{Int}`. Editable text entry is not implemented;
-pass `editable = false`.
+A sunken combo field with a raised drop button. The options list opens as
+its own borderless OS window (a popup of the owner window) anchored under
+the field, so it is never clipped by the combo box, an ancestor box or the
+edge of the window — a long item list extends past the window and scrolls
+inside a capped popup. `selected` is an `Observable{Int}`. Editable text
+entry is not implemented; pass `editable = false`.
 """
 function ComboBox(; items = Any[], selected, on_change = () -> nothing,
                   width = 160, editable = false)
@@ -304,13 +307,43 @@ function ComboBox(; items = Any[], selected, on_change = () -> nothing,
     t = theme()
     selected = @use selected
     open = @use Observable(false)
+    # The dropdown anchor, in owner-window client coordinates. Event
+    # callbacks only see placed fiber geometry (the render spec has no
+    # rects), so the toggle callback resolves the field rect and stores the
+    # anchor here before the popup window mounts.
+    popup_x = @use Ref(0.0)
+    popup_y = @use Ref(0.0)
     labels = [string(i) for i in items]
     sel = clamp(selected[], 1, max(length(labels), 1))
     value = isempty(labels) ? "" : labels[sel]
+
+    self = use_fiber()
+    field_rect() = begin
+        for c in self.children
+            c.kind === _PRESSABLE && return c.rect
+            for cc in c.children
+                cc.kind === _PRESSABLE && return cc.rect
+            end
+        end
+        return (0.0, 0.0, 0.0, 0.0)
+    end
+    # Decide on the render-time open state: while the popup is open,
+    # `close_open_menus!` already flips `open` off between press and
+    # release, so a plain `!open[]` toggle would instantly reopen it.
+    was_open = open[]
+    open_dropdown!() = begin
+        x, y, _, h = field_rect()
+        popup_x[] = x
+        popup_y[] = y + h
+        open[] = true
+        return nothing
+    end
+    toggle! = () -> was_open ? (open[] = false) : open_dropdown!()
+
     drop = @rock Pressable(
         text_element("▼"; color = t.colors.text,
                      size = 9, font = t.font);
-        on_press = () -> open[] = !open[],
+        on_press = toggle!,
         position = :absolute, anchor = :top_right, x = 0, y = 1,
         width = 18, height = t.metrics.input_height - 2,
         background = t.gradients.input_button,
@@ -325,22 +358,34 @@ function ComboBox(; items = Any[], selected, on_change = () -> nothing,
             # does not run under it.
             width = max(width - 23, 0), overflow = :hidden)),
         drop;
-        on_press = () -> open[] = !open[],
+        on_press = toggle!,
         background = t.colors.input,
         hover_background = t.colors.input,
         # The text is clipped to the field, so a long entry does not run over
         # the border when the field is squeezed.
         overflow = :hidden,
-        border_color = open[] ? t.colors.focus : t.colors.input_border,
+        border_color = was_open ? t.colors.focus : t.colors.input_border,
         border_width = 1, bevel = :sunken,
         bevel_light = t.colors.border_light,
         bevel_dark = t.colors.border_dark,
         radius = 2, width = width, height = t.metrics.input_height,
         padding = 0, direction = :row, align = :center)
+
+    row_h = t.metrics.row_height
+    full_h = 4 + length(labels) * row_h
+    max_h = 300
+    popup_h = min(full_h, max_h)
+    capped = full_h > max_h
+    # The scrolling rows box draws its scrollbar inside its right edge, so
+    # capped lists leave room for it.
+    entries_width = capped ? max(width - 4 - t.metrics.scrollbar, 0) :
+                    width - 4
     entries = Any[]
     for i in eachindex(labels)
         push!(entries, @rock Pressable(
-            text_element(labels[i]; color = i == sel ? t.colors.selection_text : t.colors.text,
+            text_element(labels[i];
+                         color = i == sel ? t.colors.selection_text :
+                                 t.colors.text,
                          size = t.metrics.font_size, font = t.font);
             on_press = () -> begin
                 selected[] = i
@@ -349,25 +394,42 @@ function ComboBox(; items = Any[], selected, on_change = () -> nothing,
             end,
             background = i == sel ? t.colors.selection : nothing,
             hover_background = i == sel ? t.colors.selection : t.colors.hot,
-            width = width - 4, height = t.metrics.row_height,
+            width = entries_width, height = row_h,
             padding_x = 3, padding_y = 0,
             direction = :row, align = :center))
     end
-    popup = open[] ?
-            (@rock Box(entries...;
-                position = :absolute, x = 0, y = t.metrics.input_height,
-                width = width, height = 4 + length(entries) * t.metrics.row_height,
-                background = t.colors.document,
-                border_color = t.colors.border, border_width = 1,
-                bevel = :raised, radius = 0,
-                padding = 2, direction = :column, gap = 0)) : nothing
-    shadows = open[] ? popup_shadows(0, t.metrics.input_height, width,
-                                     4 + length(entries) * t.metrics.row_height) :
-               Any[]
+    if capped
+        # Long lists scroll: the tagged width leaves room for the scrollbar
+        # that the box draws inside its right edge.
+        rows = @rock Box(entries...;
+            width = max(width - 4 - t.metrics.scrollbar, 0),
+            height = popup_h - 4, direction = :column, gap = 0,
+            scroll = true, scrollbar = true,
+            scrollbar_width = t.metrics.scrollbar,
+            scrollbar_track = t.colors.scrollbar_track,
+            scrollbar_thumb = t.gradients.scrollbar_thumb,
+            scrollbar_border = t.colors.scrollbar_border,
+            scrollbar_radius = 2)
+    else
+        rows = @rock Box(entries...;
+            width = width - 4, height = popup_h - 4,
+            direction = :column, gap = 0)
+    end
+    popup = open[] ? (@rock Window(
+        @rock Box(rows;
+            width = width, height = popup_h,
+            background = t.colors.document,
+            border_color = t.colors.border, border_width = 1,
+            bevel = :raised, radius = 0,
+            padding = 2, direction = :column, gap = 0);
+        position = :manual, x = Int(popup_x[]), y = Int(popup_y[]),
+        width = width, height = popup_h,
+        popup = true, menu_open = open)) : nothing
+
     return Element(
         _BOX,
         props_dict(:width => width, :height => t.metrics.input_height,
-                   :direction => :column, :overflow => :visible),
-        Any[field, shadows..., popup],
+                   :direction => :column),
+        Any[field, popup],
     )
 end

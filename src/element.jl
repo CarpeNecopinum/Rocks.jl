@@ -144,18 +144,19 @@ const Text = _TextKind()
 
 Host element kind for mouse interaction — the single primitive every
 interactive control is composed from. A `MouseArea` lays out like a neutral
-[`Box`](@ref): it renders its children (a single child fills the area exactly)
-but contributes no styling of its own — no background, border or padding
-unless you explicitly pass styling props. It never alters the flow of the
-tree beyond occupying the slot its children measure to, so wrapping content
-in `MouseArea(...)` is visually a no-op; it only makes the subtree
-interactive.
+[`Box`](@ref): it renders its children and contributes no styling of its own
+— no background, border or padding unless you explicitly pass styling props,
+so wrapping content in `MouseArea(...)` adding nothing visually; it only
+makes the subtree interactive. One layout special case: a single child with
+`fill = true` (the [`Canvas`](@ref) workspace pattern) is stretched over the
+**whole** area, which is what makes canvas draw coordinates and the
+callbacks' area-local coordinates coincide.
 
 Props:
 
 * Mouse callbacks — all coordinates are **area-local** (0,0 = area top-left;
-  a single-child wrapper over a [`Canvas`](@ref) therefore shares the
-  canvas's draw coordinates):
+  a single `fill = true` child shares one coordinate space with its own draw
+  area, e.g. a wrapped canvas):
   * `on_down(x, y, button)` — a button was pressed in the area (left is
     button 1). While the button is held, the area captures the pointer: it
     keeps receiving motion even outside its bounds (drag tracking) until the
@@ -190,7 +191,7 @@ name); prefer `MouseArea` in new code.
 ```julia
 # A canvas workspace that pans and zooms:
 @rock MouseArea(
-    @rock Canvas(draw = draw_scene, background = (0.97, 0.97, 0.97));
+    @rock Canvas(draw = draw_scene, background = (0.97, 0.97, 0.97), fill = true);
     on_down = (x, y, b) -> (start = (x, y)),
     on_move = (x, y) -> pan_view!(x, y),
     on_wheel = (dx, dy, x, y) -> zoom_at!(x, y, dy),
@@ -222,11 +223,11 @@ Props:
   `gap`, `padding`, `align`, `overflow`, `position = :absolute`, `flex`, …
 
 The canvas is a pure drawing surface: it takes no part in pointer event
-dispatch. Make it interactive by wrapping it in a [`MouseArea`](@ref) — with
-a single child, the canvas and the area coincide exactly, so the callbacks'
-**area-local** coordinates match the canvas's **canvas-local** draw
-coordinates (a pan/zoom handler reuses the same transform as the `draw`
-callback):
+dispatch. Make it interactive by wrapping it in a [`MouseArea`](@ref) — as
+the area's single `fill = true` child, the canvas and the area coincide
+exactly, so the callbacks' **area-local** coordinates match the canvas's
+**canvas-local** draw coordinates (a pan/zoom handler reuses the same
+transform as the `draw` callback):
 
 The canvas composites naturally with sibling panels, respects parent
 clipping, and needs no texture round-trip — a pan/zoom drag re-issues vector

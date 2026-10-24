@@ -55,7 +55,14 @@ nested windows are hit-tested through their own OS window)."
 function hit_test(fiber, x, y)
     rx, ry, rw, rh = fiber.rect
     inside_parent = !(x < rx || y < ry || x >= rx + rw || y >= ry + rh)
-    if !inside_parent && Symbol(get(fiber.props, :overflow, :hidden)) !== :visible
+    # Host fibers represent visible boxes, so they clip by default and an
+    # `:overflow => :visible` consciously punches a hit-test (and rendering)
+    # hole. Component fibers are transparent forwards to their output: their
+    # props come from the call site, where `overflow` is not a meaningful
+    # prop, so hitting a popup that overflows the component's own rect must
+    # still descend into the (typically smaller) output subtree.
+    default_overflow = is_host(fiber.kind) ? :hidden : :visible
+    if !inside_parent && Symbol(get(fiber.props, :overflow, default_overflow)) !== :visible
         return nothing
     end
     for child in reverse(fiber.children)

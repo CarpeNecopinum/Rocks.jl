@@ -120,14 +120,16 @@ function App(; initial_zoom = 4.0, initial_panx = 40.0, initial_pany = 210.0)
     @rock Window(
         @rock Row(
             # The canvas is a pure drawing surface; the MouseArea wrapper
-            # makes it interactive. With a single child the two coincide
-            # exactly, so the area-local callback coordinates equal the
-            # canvas-local draw coordinates. `on_move` also fires on plain
-            # hover, so the pan gate is an explicit dragging flag.
+            # makes it interactive. The canvas is the wrapper's single
+            # `fill = true` child, so it occupies the area exactly and the
+            # area-local callback coordinates equal the canvas-local draw
+            # coordinates. `on_move` also fires on plain hover, so the pan
+            # gate is a silent dragging flag.
             @rock MouseArea(
                 @rock Canvas(
                     draw = (ctx) -> draw_workspace(ctx, zoom[], panx[], pany[]),
-                    background = (0.95, 0.95, 0.95));
+                    background = (0.95, 0.95, 0.95),
+                    fill = true);
                 on_down = (x, y, _) -> begin
                     panx0[] = panx[] - x
                     pany0[] = pany[] - y

@@ -277,8 +277,9 @@ Akin to React Native, styling is left to the user. Rocks provides primitives:
   and calls `draw = canvas -> nothing` with a context that draws lines,
   polylines, polygons, text … straight into the SDL renderer (canvas-local
   coordinates). It is a pure drawing surface with no pointer handling — wrap
-  it in a `MouseArea` to make it interactive (the single child then coincides
-  with the area, so the draw and callback coordinates match one-to-one).
+  it in a `MouseArea` to make it interactive (a `fill = true` child then
+  coincides with the area, so the draw and callback coordinates match
+  one-to-one).
 
 Plus pre-styled components (Material-UI-inspired, built on the primitives;
 see also the separate Windows 7 / Winforms set, `Rocks.Enterprise`, below):
@@ -514,9 +515,11 @@ close button — the close button resolves like the Cancel choice, so no scrim
 is drawn over the parent window). `Form` wires the menu window in
 automatically through its `menu` prop; a standalone
 `ContextMenu` or `MenuBar` should be
-given `position = :absolute, fill = true`. A `ComboBox` popup is painted by
-the combo itself, so leave vertical room below it (or place it after
-potentially overlapping siblings). `GridView` accepts `fill = true` to stretch
+given `position = :absolute, fill = true`. The `ComboBox` dropdown opens as
+its own borderless OS popup window, anchored right below the field — never
+clipped by its owner window, so vertical room below the control is not
+needed and long lists surface as-is and scroll inside a max-height popup.
+`GridView` accepts `fill = true` to stretch
 its last column across the grid width, and `ToolTip` accepts `offset_y` to
 move the tip relative to the wrapped control.
 
