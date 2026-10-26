@@ -99,21 +99,19 @@ function Form(; menu = nothing, toolbar = nothing, status = nothing,
               height = 600, resizable = true, padding = 12,
               on_scroll = nothing)
     t = theme()
-    menu_h = menu === nothing ? 0 : t.metrics.menu_height
-    toolbar_h = toolbar === nothing ? 0 : t.metrics.toolbar_height
-    status_h = status === nothing ? 0 : t.metrics.status_height
-    content_y = menu_h + toolbar_h
-    # Bars are component elements; fill lets their host box stretch to the
-    # window width inside the absolute wrapper.
+    # The form is a column flow: the bars auto-size to their contents
+    # (+padding) unless a fixed size is set, and the scroll view grows
+    # (`flex = 1`) to fill the remaining space.
     toolbar !== nothing && toolbar isa Element &&
         (toolbar.props[:fill] = true)
     status !== nothing && status isa Element &&
         (status.props[:fill] = true)
-    if menu isa Element && menu.kind === MenuBar
-        menu.props[:position] = :absolute
-        menu.props[:fill] = true
-        menu.props[:x] = 0
-        menu.props[:y] = 0
+    # The menu joins the column flow (the MenuBar defaults to :absolute for
+    # standalone use — override it, or the flow layout excludes it and the
+    # scroll view overlaps the bar).
+    menu !== nothing && menu isa Element && begin
+        (menu.props[:fill] = true)
+        (menu.props[:position] = :relative)
     end
     # Overlay dialogs (context menus) paint above everything as an absolute
     # child; window-based dialogs (MessageBox) mount untouched as an extra
@@ -125,19 +123,14 @@ function Form(; menu = nothing, toolbar = nothing, status = nothing,
         overlay.props[:pointer_events] = :none
     end
     toolbar_wrap = toolbar === nothing ? nothing :
-        Element(_BOX, props_dict(:position => :absolute, :x => 0,
-                                 :y => menu_h, :fill => true,
-                                 :height => toolbar_h,
-                                 :direction => :column), Any[toolbar])
+        Element(_BOX, props_dict(:fill => true, :direction => :column),
+                Any[toolbar])
     status_wrap = status === nothing ? nothing :
-        Element(_BOX, props_dict(:position => :absolute, :anchor => :bottom_left,
-                                 :x => 0, :fill => true, :height => status_h,
-                                 :direction => :column),
+        Element(_BOX, props_dict(:fill => true, :direction => :column),
                 Any[status])
     scroll = Element(
         _SCROLLVIEW,
-        props_dict(:position => :absolute, :x => 0, :y => content_y,
-                   :fill => true, :bottom => status_h,
+        props_dict(:fill => true, :flex => 1,
                    :background => t.colors.window,
                    :padding => padding, :gap => 8,
                    :direction => :column, :align => :start,
@@ -165,6 +158,6 @@ function Form(; menu = nothing, toolbar = nothing, status = nothing,
         props_dict(:title => title, :width => width, :height => height,
                    :resizable => resizable, :background => t.colors.window,
                    :padding => 0, :direction => :column),
-        Any[toolbar_wrap, scroll, status_wrap, menu, overlay_child],
+        Any[menu, toolbar_wrap, scroll, status_wrap, overlay_child],
     )
 end

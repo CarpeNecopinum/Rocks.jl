@@ -208,6 +208,10 @@ function MenuBar(; menus = Any[], position = :absolute, fill = true,
         _BOX,
         props_dict(:position => Symbol(position), :x => x, :y => y,
                    :fill => fill, :pointer_events => :none,
+                   # The bar's row is absolutely positioned inside (so the
+                   # dropdown anchors to this box) — the box therefore needs
+                   # its fixed height; the auto-size sees no flow children.
+                   :height => t.metrics.menu_height,
                    :direction => :column),
         Any[row, dropdown],
     )
@@ -248,23 +252,23 @@ end
 
 A 28px gradient toolbar with an optional grip and separators.
 """
-function ToolBar(; children = Any[], grip = true, fill = false)
+function ToolBar(; children = Any[], grip = true, fill = false, height = nothing)
     t = theme()
     kids = Any[
         grip ? grip_dots(rows = 3, color = t.colors.border_dark) : nothing,
         children...,
     ]
-    return Element(
-        _BOX,
-        props_dict(:direction => :row, :align => :center,
-                   :height => t.metrics.toolbar_height,
-                   :padding_x => 4, :padding_y => 2, :gap => 2,
-                   :background => t.gradients.toolbar,
-                   :border_color => t.colors.border,
-                   :border_width => 1, :bevel => :raised,
-                   :fill => fill),
-        kids,
-    )
+    props = props_dict(:direction => :row, :align => :center,
+                       :padding_x => 4, :padding_y => 2, :gap => 2,
+                       :background => t.gradients.toolbar,
+                       :border_color => t.colors.border,
+                       :border_width => 1, :bevel => :raised,
+                       :fill => fill)
+    # A Box auto-sizes to its contents unless a fixed size is set: the
+    # toolbar's height defaults to the content so taller tool rows (a 9-dot
+    # grid, labelled spinners) are never clipped.
+    height === nothing || (props[:height] = height)
+    return Element(_BOX, props, kids)
 end
 
 """

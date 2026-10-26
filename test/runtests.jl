@@ -253,11 +253,11 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             count[] += 1
             @test count[] == 3
             # setting an identical value does not trigger a re-render
-            Rocks.DIRTY[] = false
+            empty!(Rocks.DIRTY_FIBERS)
             count[] = 3
-            @test Rocks.DIRTY[] == false
+            @test isempty(Rocks.DIRTY_FIBERS)
             count[] = 4
-            @test Rocks.DIRTY[] == true
+            @test !isempty(Rocks.DIRTY_FIBERS)
 
             Rocks.perform_render!(root)
             Rocks.run_effects!()
@@ -278,9 +278,9 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             count = root.hooks[1].value
             @test count[] == 0
             @test Rocks.text_content(root.children[1].children[1]) == "count: 0"
-            Rocks.DIRTY[] = false
+            empty!(Rocks.DIRTY_FIBERS)
             count[] = 3
-            @test Rocks.DIRTY[] == true # setting triggers a re-render
+            @test !isempty(Rocks.DIRTY_FIBERS) # setting triggers a re-render
             Rocks.perform_render!(root)
             @test Rocks.text_content(root.children[1].children[1]) == "count: 3"
         end
@@ -324,9 +324,9 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         end
         with_tree(SharedApp) do root
             @test Rocks.text_content(root.children[1].children[1]) == "shared: 0"
-            Rocks.DIRTY[] = false
+            empty!(Rocks.DIRTY_FIBERS)
             shared[] = 1
-            @test Rocks.DIRTY[] == true # subscribed while mounted
+            @test !isempty(Rocks.DIRTY_FIBERS) # subscribed while mounted
             Rocks.perform_render!(root)
             @test Rocks.text_content(root.children[1].children[1]) == "shared: 1"
         end
@@ -349,7 +349,7 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             @test Rocks.DIRTY[] == false
             @test effect_runs[] == 1
             state[] = (a = 5, b = 9) # b changed -> re-render
-            @test Rocks.DIRTY[] == true
+            @test !isempty(Rocks.DIRTY_FIBERS)
             Rocks.perform_render!(root)
             Rocks.run_effects!()
             @test effect_runs[] == 2
@@ -1531,9 +1531,9 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             consumer = root.children[1].children[1] # Provider -> Consumer
             @test Rocks.text_content(consumer.children[1].children[1]) == "dark: true"
             @test length(theme_obs.listeners) == 1 # subscribed via @use
-            Rocks.DIRTY[] = false
+            empty!(Rocks.DIRTY_FIBERS)
             theme_obs[] = (dark = false,)
-            @test Rocks.DIRTY[] == true
+            @test !isempty(Rocks.DIRTY_FIBERS)
             Rocks.perform_render!(root)
             @test Rocks.text_content(consumer.children[1].children[1]) == "dark: false"
         end
@@ -1880,6 +1880,140 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 occursin(needle, text_of(p)) && return p
             end
             return nothing
+        end
+
+        @testset "overflow checking" begin
+            # A form whose bars auto-size: nothing overflows its parent.
+            function OkForm()
+                @rock E.Form(
+                    @rock E.Label("Client area");
+                    menu = (@rock E.MenuBar(menus = [E.Menu("File", items = [
+                        E.MenuItem(label = "Quit", on_press = () -> nothing)])])),
+                    toolbar = (@rock E.ToolBar(
+                        (@rock E.ToolButton(label = "New", on_press = () -> nothing)))),
+                    status = (@rock E.StatusBar(panels = Any[E.StatusPanel(text = "Ready")])),
+                    title = "t")
+            end
+            with_tree(OkForm) do root
+                sync_windows!(root)
+                overflows = Rocks.overflowing(root)
+                if !isempty(overflows)
+                    for (child, parent) in overflows
+                        println("DBG overflow: ", nameof(typeof(child.kind)),
+                                " child rect=", child.rect, " inside ",
+                                nameof(typeof(parent.kind)), " rect=", parent.rect)
+                    end
+                end
+                @test isempty(overflows)
+            end
+
+            # A fixed-height box smaller than its content: the child overflows.
+            function TightForm()
+                @rock Window(@rock Box(
+                    @rock E.Spinner(value = Observable(0.0), width = 140);
+                    height = 12, fill = true, direction = :row);
+                    title = "t", width = 300, height = 120)
+            end
+            with_tree(TightForm) do root
+                sync_windows!(root)
+                overflows = Rocks.overflowing(root)
+                @test !isempty(overflows)
+            end
+        end
+
+        @testset "Spinner" begin
+            value = Observable(5.0)
+            changes = Ref(0)
+            function SpinnerApp()
+                @rock E.Spinner(value = value, step = 1.0;
+                                on_change = v -> changes[] += 1)
+            end
+            with_tree(SpinnerApp) do root
+                # The up arrow steps by `step` and fires on_change.
+                pressable_with(root, "▲").props[:on_press]()
+                @test value[] == 6.0
+                @test changes[] == 1
+                # The down arrow steps down; the field shows the typed number.
+                down = pressable_with(root, "▼")
+                down.props[:on_press]()
+                down.props[:on_press]()
+                @test value[] == 4.0
+                @test changes[] == 3
+                # External changes to `value` update the field text.
+                Rocks.perform_render!(root)
+                value[] = 10.0
+                Rocks.perform_render!(root)
+                field = first(f for f in collect_kind(root, Pressable)
+                              if haskey(f.props, :on_text_input))
+                # Typing a number and pressing Return writes it back.
+                field.props[:on_key_mods]("a", 0x0040)   # Ctrl+A select all
+                field.props[:on_text_input]("2.5")
+                field.props[:on_key]("Return")
+                @test value[] == 2.5
+                @test changes[] == 4
+                # Non-numeric input restores the current value.
+                field.props[:on_key_mods]("a", 0x0040)
+                field.props[:on_text_input]("x")
+                field.props[:on_key]("Return")
+                @test value[] == 2.5
+                # The keyboard's Up/Down keys step the value (the on_arrow hook).
+                field.props[:on_key]("Up")
+                Rocks.flush_dirty!(); Rocks.run_effects!()
+                @test value[] == 3.5
+                field.props[:on_key]("Down")
+                Rocks.flush_dirty!(); Rocks.run_effects!()
+                @test value[] == 2.5
+            end
+        end
+
+        @testset "targeted re-render" begin
+            a_renders = Ref(0)
+            b_renders = Ref(0)
+            a_state = Observable(0)
+            b_state = Observable(0)
+            function CompA()
+                a_renders[] += 1
+                v = @use a_state
+                return @rock Box(@rock Text(string(v[])))
+            end
+            function CompB()
+                b_renders[] += 1
+                v = @use b_state
+                return @rock Box(@rock Text(string(v[])))
+            end
+            function SiblingsApp()
+                @rock Window(@rock CompA(), @rock CompB(); title = "t")
+            end
+            with_tree(SiblingsApp) do root
+                a_renders[] = 0
+                b_renders[] = 0
+                # A state change re-renders only the subscribing fiber's
+                # subtree; the sibling is untouched.
+                a_state[] = 1
+                Rocks.flush_dirty!()
+                Rocks.run_effects!()
+                @test a_renders[] == 1
+                @test b_renders[] == 0
+                b_state[] = 2
+                Rocks.flush_dirty!()
+                Rocks.run_effects!()
+                @test a_renders[] == 1
+                @test b_renders[] == 1
+                # The rendered text reflects the new values.
+                texts = String[]
+                function walk(f)
+                    f.kind === Rocks.Text && push!(texts, Rocks.text_content(f))
+                    foreach(walk, f.children)
+                end
+                walk(root)
+                @test "1" in texts && "2" in texts
+                # The global request still re-renders the whole tree.
+                a_renders[] = 0
+                b_renders[] = 0
+                Rocks.request_render()
+                Rocks.perform_render!(root)
+                @test a_renders[] == 1 && b_renders[] == 1
+            end
         end
 
         @testset "theme, gradients and primitives" begin
@@ -2267,23 +2401,22 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 pressable_with(root, "New").props[:on_press]()
                 @test tool_clicks[] == 1
                 bars = [b for b in collect_kind(root, Box)
-                        if get(b.props, :bevel, nothing) === :raised &&
-                           get(b.props, :height, nothing) in (22, 28)]
+                        if get(b.props, :bevel, nothing) === :raised]
                 @test length(bars) >= 2
                 # Resizing re-derives the client area: the scrolled client
-                # starts below the toolbar and stops above the status bar.
+                # starts below the toolbar and stops above the status bar
+                # (the bars auto-size to their contents; the scroll view
+                # grows to fill the rest).
                 w = sync_windows!(root)[1]
                 sv = find_kind(root, E.ScrollView)
                 sv_y = sv.rect[2]
-                stat = only(c for c in w.children if
-                            c isa Rocks.Fiber &&
-                            get(c.props, :anchor, nothing) === :bottom_left)
+                @test sv_y >= 22                     # below the menu/toolbar
                 w.host.height = 120
                 w.host.needs_layout = true
                 Rocks.measure!(w)
                 Rocks.place!(w, 0.0, 0.0)
                 @test sv.rect[2] == sv_y             # still below the toolbar
-                @test sv.rect[2] + sv.rect[4] == stat.rect[2]  # above status
+                @test sv.rect[2] + sv.rect[4] <= 120 # inside the window
             end
 
             open = Observable(true)

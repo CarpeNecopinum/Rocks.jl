@@ -221,6 +221,9 @@ function shutdown_backend()
     GRAB_CURSOR[] = C_NULL
     GRABBING_CURSOR[] = C_NULL
     CURSORS_UNAVAILABLE[] = false
+    # Pending re-renders belong to the (unmounted) fibers of the session that
+    # just ended.
+    empty!(DIRTY_FIBERS)
     BACKEND_INITIALIZED[] = false
     return nothing
 end

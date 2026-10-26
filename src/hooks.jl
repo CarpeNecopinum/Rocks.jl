@@ -62,10 +62,11 @@ function subscribe_observable!(hook, value)
     hook.subscription !== nothing && off(hook.subscription)
     hook.subscribed_to = value
     hook.last = value[]
+    fiber = CURRENT_FIBER[]
     hook.subscription = on(value) do new
         new === hook.last && return # identical values do not re-render
         hook.last = new
-        request_render()
+        mark_dirty!(fiber)
     end
     return nothing
 end

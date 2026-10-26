@@ -943,3 +943,46 @@ function place_absolute_children!(fiber, x, y, w, h)
     end
     return nothing
 end
+
+# ---- overflow checking (debug/test helper) --------------------------------
+
+"""
+    overflowing(fiber; skip_absolute = true, tol = 0.5) -> Vector{Pair{Fiber, Fiber}}
+
+Walk the placed fiber tree and report every `(child, parent)` pair where the
+child's placed rect extends beyond its parent's content box (the parent's
+rect inset by its padding).
+
+Parents that scroll (`ScrollView`, a `Box` with `scroll = true`) are skipped:
+their children legitimately overflow. Absolutely-positioned children are
+skipped too by default (`skip_absolute = true`) — they are placed
+intentionally and may deliberately stick out (tooltips, badges). Text fibers
+are skipped (their measured rect is the glyph box).
+
+Run after `measure!`/`place!` — a screenshot test renders the app and asserts
+`isempty(overflowing(root))` instead of checking layouts by hand.
+"""
+function overflowing(fiber; skip_absolute = true, tol = 0.5,
+                     out = Pair{Fiber,Fiber}[])
+    # Only host fibers are layout containers; a component fiber's own rect
+    # is meaningless (its output element is the container).
+    if is_host(fiber.kind) && !is_scrollable(fiber)
+        px, py = padding_of(fiber)
+        (px0, py0, pw, ph) = fiber.rect
+        for child in fiber.children
+            child.props !== nothing || continue
+            skip_absolute && get(child.props, :position, nothing) === :absolute &&
+                continue
+            (cx, cy, cw, ch) = child.rect
+            (cw <= 0 && ch <= 0) && continue
+            if cx < px0 - tol || cy < py0 - tol ||
+               cx + cw > px0 + pw + tol || cy + ch > py0 + ph + tol
+                push!(out, child => fiber)
+            end
+        end
+    end
+    for child in fiber.children
+        overflowing(child; skip_absolute = skip_absolute, tol = tol, out = out)
+    end
+    return out
+end

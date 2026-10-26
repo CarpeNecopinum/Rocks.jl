@@ -13,6 +13,81 @@ mutating a ref).
 """
 request_render() = (DIRTY[] = true; nothing)
 
+# ---- targeted re-renders --------------------------------------------------
+#
+# Changing an Observable re-renders only the fiber(s) that subscribed to it
+# (React-style: the component that "uses" the state, plus its subtree) — not
+# the whole application. `request_render()` remains the global escape hatch.
+
+const DIRTY_FIBERS = Fiber[]
+
+"Mark a fiber's subtree for a re-render. `nothing` falls back to the global
+`request_render()` (used when subscribing outside a component render)."
+function mark_dirty!(fiber)
+    if fiber === nothing
+        request_render()
+        return nothing
+    end
+    fiber.mounted || return nothing
+    fiber in DIRTY_FIBERS || push!(DIRTY_FIBERS, fiber)
+    return nothing
+end
+
+"Whether `fiber` lies inside one of `flushed`' subtrees (or is one of them)."
+function _in_subtree_of_any(fiber, flushed)
+    for a in flushed
+        f = fiber
+        while f !== nothing
+            f === a && return true
+            f = f.parent
+        end
+    end
+    return false
+end
+
+"""
+    flush_dirty!() -> Nothing
+
+Re-render the subtrees of the fibers whose state changed, until the values
+settle. A re-render may dirty further fibers (a body writing another
+observable); those are processed in the same pass.
+"""
+function flush_dirty!()
+    flushed = Fiber[]
+    while !isempty(DIRTY_FIBERS)
+        fiber = popfirst!(DIRTY_FIBERS)
+        fiber.mounted || continue
+        # An ancestor flushed in this pass already re-rendered this subtree.
+        _in_subtree_of_any(fiber, flushed) && continue
+        perform_render!(fiber)
+        push!(flushed, fiber)
+        # Walk up to the window: the redraw follows the re-render.
+        f = fiber
+        while f !== nothing && !(f.host isa WindowState)
+            f = f.parent
+        end
+        if f !== nothing
+            (f.host::WindowState).needs_draw = true
+        end
+    end
+    return nothing
+end
+
+"""
+    request_redraw() -> Nothing
+
+Mark every live window for a **draw-only** redraw: the `Canvas` draw
+callbacks re-issue their primitives, but no component function re-runs.
+Used by animated canvases (e.g. marching dashes) where only the pixels
+change between frames.
+"""
+function request_redraw()
+    for (_, fiber) in WINDOW_BY_ID
+        fiber.host isa WindowState && (fiber.host.needs_draw = true)
+    end
+    return nothing
+end
+
 """
     quit!()
 
@@ -131,12 +206,17 @@ function render(app; kwargs...)
                 end
             end
             fire_timers!()
-            if DIRTY[]
+            if DIRTY[] || !isempty(DIRTY_FIBERS) || !isempty(PENDING_EFFECTS)
+                global_requested = DIRTY[]
                 DIRTY[] = false
-                # Rendering (component functions, reconciliation, effects,
-                # layout) only happens when the application is dirty.
-                perform_render!(root)
+                # The global request re-renders the whole tree; a state change
+                # re-renders only the subscribing fibers' subtrees.
+                global_requested && (perform_render!(root); empty!(DIRTY_FIBERS))
+                flush_dirty!()
                 run_effects!()
+                flush_dirty!()   # effects may write state
+                run_effects!()
+                flush_dirty!()
                 empty!(windows)
                 collect_windows!(windows, root)
                 for w in windows

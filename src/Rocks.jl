@@ -55,7 +55,7 @@ include("mechanics.jl")
 include(joinpath("Material3", "Material3.jl"))
 include(joinpath("Enterprise", "Enterprise.jl"))
 
-export @rock, @use, render, quit!, screenshot,
+export @rock, @use, render, quit!, screenshot, request_redraw,
        Window, Box, Text, Pressable, MouseArea, Row, Column, ScrollView,
        Image, Split, Slider, Canvas, LinearGradient,
        Button, Checkbox, Toggle, RadioGroup, DropDownMenu, Tabber, ProgressBar,

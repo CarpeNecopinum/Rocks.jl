@@ -99,7 +99,8 @@ the field places the caret at the nearest character boundary. `text` is an
 """
 function TextBox(; text, read_only = false, password = false, placeholder = "",
                   width = 160, height = nothing, disabled = false,
-                  on_submit = () -> nothing, on_change = () -> nothing)
+                  on_submit = () -> nothing, on_change = () -> nothing,
+                  on_arrow = nothing, on_wheel = nothing)
     text isa Observable ||
         error("Enterprise.TextBox needs an `Observable` as its `text` prop")
     t = theme()
@@ -321,6 +322,10 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
                     delete!(true)
                 elseif k == "Return"
                     on_submit()
+                elseif k == "Up" && on_arrow !== nothing
+                    on_arrow(1)
+                elseif k == "Down" && on_arrow !== nothing
+                    on_arrow(-1)
                 elseif k == "Escape"
                     unfocus!()
                 end
@@ -391,6 +396,7 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
                 return nothing
             end,
             :disabled => disabled,
+            :on_wheel => on_wheel,
             :cursor => :text,
             # The text is clipped to the field, so a long text does not run
             # over the border when the field is squeezed.
@@ -643,4 +649,67 @@ function Slider(; value, min = 0, max = 1, width = 200, ticks = 0)
         ),
         Any[],
     )
+end
+
+"""
+    Enterprise.Spinner(; value, step = 1.0, width = 160, digits = 2,
+                       on_change = v -> nothing)
+
+A numeric input: a text field with stacked up/down arrow buttons. `value` is
+an `Observable{<:Real}` — editing the field (Return), pressing the arrows or
+the keyboard's Up/Down keys writes the parsed number back to it and runs
+`on_change(v)`. External changes to `value` update the field. The up/down
+buttons and keys step by `step` from the
+currently typed number.
+"""
+function Spinner(; value, step = 1.0, width = 160, digits = 2,
+                 on_change = v -> nothing)
+    value isa Observable && value[] isa Real ||
+        error("Enterprise.Spinner needs an `Observable{<:Real}` as its `value` prop")
+    t = theme()
+    h = t.metrics.input_height
+    fmt(v) = string(round(v; digits = digits))
+    # `@use value` subscribes the spinner: external changes re-render it.
+    value_obs = @use value
+    text = @use Observable(fmt(value_obs[]))
+    # Keep the field in sync with external changes to `value` — but not while
+    # the user is typing in it (a re-render would otherwise clobber the
+    # in-progress text).
+    has_focus() || (text[] == fmt(value_obs[]) || (text[] = fmt(value_obs[])))
+    submit() = begin
+        v = tryparse(Float64, text[])
+        if v === nothing
+            text[] = fmt(value_obs[])
+        else
+            value_obs[] = v
+            on_change(v)
+        end
+        return nothing
+    end
+    bump(d) = begin
+        v = tryparse(Float64, text[])
+        base = v === nothing ? value_obs[] : v
+        value_obs[] = base + d * step
+        # Write the field text directly: the body sync above is suppressed
+        # while the field is focused, so an arrow/wheel step would otherwise
+        # only show after defocus — and the stale text would be re-parsed as
+        # the base of the next step, limiting it to a single step. The
+        # TextBox clamps its caret/selection to the new length when read.
+        text[] = fmt(value_obs[])
+        on_change(value_obs[])
+        return nothing
+    end
+    arrow = (label, d) -> Mechanics.Button(; label = label,
+        on_press = () -> bump(d), width = 15, height = (h - 2) ÷ 2,
+        background = t.colors.control, text_color = t.colors.text,
+        border_color = t.colors.border, border_width = 1, radius = 0,
+        padding = 0, gap = 0, size = t.metrics.font_size - 4, font = t.font,
+        bevel = :raised)
+    field = @rock TextBox(text = text; width = width - 15, on_submit = submit,
+                          on_arrow = d -> bump(d),
+                          on_wheel = (dx, dy, x, y) -> bump(dy))
+    arrows = @rock Column(
+        arrow("▲", 1), arrow("▼", -1);
+        gap = 1)
+    return @rock Row(field, arrows; gap = 1, align = :center)
 end
