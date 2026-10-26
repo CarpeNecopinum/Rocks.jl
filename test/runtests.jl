@@ -1964,6 +1964,57 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 Rocks.flush_dirty!(); Rocks.run_effects!()
                 @test value[] == 2.5
             end
+            # A disabled spinner: the field drops its keyboard-handler props
+            # (focus follows key *presence*), so it cannot grab focus, and
+            # the arrows do nothing.
+            function DisabledSpinnerApp()
+                (@rock E.Spinner(value = value, step = 1.0, disabled = true))
+            end
+            with_tree(DisabledSpinnerApp) do root
+                fields = [f for f in collect_kind(root, Pressable)
+                          if haskey(f.props, :disabled) &&
+                             f.props[:disabled]]
+                @test !isempty(fields)
+                # No keyboard-handler props: clicking cannot set focus, the
+                # key events fall through.
+                @test all(f -> !haskey(f.props, :on_text_input) &&
+                               !haskey(f.props, :on_key), fields)
+                # The field still reflects external value changes while
+                # disabled: the body sync runs because the field can no
+                # longer hold focus.
+                value[] = 11.0
+                Rocks.perform_render!(root)
+                shown = join([Rocks.text_content(f)
+                              for f in collect_kind(root, Rocks.Text)])
+                @test occursin("11.0", shown)
+            end
+        end
+
+        @testset "text input follows focus" begin
+            tstate = Observable("hi")
+            function FieldApp()
+                @rock Window(@rock E.TextBox(text = tstate); title = "f")
+            end
+            with_tree(FieldApp) do root
+                w = sync_windows!(root)[1]
+                host = w.host
+                @test host isa Rocks.WindowState
+                # SDL3 delivers no typed-character events unless text input
+                # is started: it must follow the keyboard focus.
+                @test !SDL3.TextInputActive(host.ptr)
+                field = first(f for f in collect_kind(root, Pressable)
+                              if haskey(f.props, :on_text_input))
+                Rocks.focus!(field)
+                @test SDL3.TextInputActive(host.ptr)
+                # A non-text focus target releases it.
+                Rocks.unfocus!()
+                @test !SDL3.TextInputActive(host.ptr)
+                Rocks.focus!(field)
+                # ...and an unmounted field drops it (the unmount sweep).
+                @test SDL3.TextInputActive(host.ptr)
+                Rocks.unmount!(field)
+                @test !SDL3.TextInputActive(host.ptr)
+            end
         end
 
         @testset "targeted re-render" begin

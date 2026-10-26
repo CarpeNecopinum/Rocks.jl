@@ -224,10 +224,12 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
     content = show_placeholder ?
               Any[text_element(placeholder; color = t.colors.disabled_text,
                                size = t.metrics.font_size, font = t.font)] :
-              Any[piece(before, t.colors.text),
+              Any[piece(before, disabled ? t.colors.disabled_text :
+                                          t.colors.text),
                   piece(span, selection ? t.colors.selection_text :
                                           t.colors.text),
-                  piece(after, t.colors.text)]
+                  piece(after, disabled ? t.colors.disabled_text :
+                                          t.colors.text)]
     caret = focused ? (@rock Box(; position = :absolute,
         x = t.metrics.border + 6 + text_width(before, t), y = 3, width = 1,
         height = max(h - 6, 4), background = t.colors.text)) : nothing
@@ -306,9 +308,7 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
                  x = menu_x[], y = menu_y[], width = 150,
                  items = menu_items) : nothing
 
-    return Element(
-        _PRESSABLE,
-        props_dict(
+    props = props_dict(
             :on_text_input => edit ? (s) -> begin
                 # Ignore text delivered from Ctrl/Alt/Gui combos; plain typed
                 # characters arrive without those modifiers.
@@ -415,7 +415,17 @@ function TextBox(; text, read_only = false, password = false, placeholder = "",
             :padding_y => 0,
             :direction => :row,
             :align => :center,
-        ),
+        )
+    # A disabled field must not carry the keyboard-handler keys: focus
+    # follows the click via key *presence* (`find_focusable`), and a
+    # disabled field holding them would silently steal focus on click —
+    # which also suppresses owners' `has_focus()` syncs. `Base.delete!`
+    # because `delete!` is this component's backspace helper.
+    disabled && (Base.delete!(props, :on_text_input);
+                 Base.delete!(props, :on_key))
+    return Element(
+        _PRESSABLE,
+        props,
         Any[selbg, caret, row, ctx],
     )
 end
@@ -660,10 +670,11 @@ an `Observable{<:Real}` — editing the field (Return), pressing the arrows or
 the keyboard's Up/Down keys writes the parsed number back to it and runs
 `on_change(v)`. External changes to `value` update the field. The up/down
 buttons and keys step by `step` from the
-currently typed number.
+currently typed number. `disabled` blocks all interaction and grays the
+field out.
 """
 function Spinner(; value, step = 1.0, width = 160, digits = 2,
-                 on_change = v -> nothing)
+                 on_change = v -> nothing, disabled = false)
     value isa Observable && value[] isa Real ||
         error("Enterprise.Spinner needs an `Observable{<:Real}` as its `value` prop")
     t = theme()
@@ -700,14 +711,19 @@ function Spinner(; value, step = 1.0, width = 160, digits = 2,
         return nothing
     end
     arrow = (label, d) -> Mechanics.Button(; label = label,
-        on_press = () -> bump(d), width = 15, height = (h - 2) ÷ 2,
-        background = t.colors.control, text_color = t.colors.text,
+        on_press = disabled ? () -> nothing : () -> bump(d), width = 15,
+        height = (h - 2) ÷ 2,
+        background = t.colors.control, text_color = disabled ?
+                                       t.colors.disabled_text :
+                                       t.colors.text,
         border_color = t.colors.border, border_width = 1, radius = 0,
         padding = 0, gap = 0, size = t.metrics.font_size - 4, font = t.font,
-        bevel = :raised)
+        bevel = :raised, disabled = disabled)
     field = @rock TextBox(text = text; width = width - 15, on_submit = submit,
-                          on_arrow = d -> bump(d),
-                          on_wheel = (dx, dy, x, y) -> bump(dy))
+                          on_arrow = disabled ? nothing : d -> bump(d),
+                          on_wheel = disabled ? nothing :
+                                     (dx, dy, x, y) -> bump(dy),
+                          disabled = disabled)
     arrows = @rock Column(
         arrow("▲", 1), arrow("▼", -1);
         gap = 1)

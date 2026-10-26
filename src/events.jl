@@ -367,6 +367,39 @@ inside((rx, ry, rw, rh), x, y) = rx <= x < rx + rw && ry <= y < ry + rh
 # press carrying `on_key`/`on_text_input` props); `nothing` means the window.
 const FOCUSED = Ref{Union{Nothing,Fiber}}(nothing)
 
+# SDL3 delivers no SDL_EVENT_TEXT_INPUT (the typed characters) by default —
+# text input must be started per window with SDL_StartTextInput. Its lifetime
+# follows the keyboard focus: while the focused fiber carries an
+# `on_text_input` prop, text input is active for the window it belongs to;
+# without a focused text field it stops, so plain key presses keep their
+# normal meaning everywhere else.
+function sync_text_input!(fiber)
+    f = fiber
+    while f isa Fiber && !is_window(f)
+        f = f.parent
+    end
+    f isa Fiber || return
+    host = f.host isa WindowState ? f.host : nothing
+    host === nothing && return
+    want = fiber isa Fiber && haskey(fiber.props, :on_text_input)
+    if want
+        SDL3.TextInputActive(host.ptr) || SDL3.StartTextInput(host.ptr)
+    elseif SDL3.TextInputActive(host.ptr)
+        SDL3.StopTextInput(host.ptr)
+    end
+    return nothing
+end
+
+"Stop SDL text input on every open window (the leaving focus's window is
+unknown)."
+function stop_all_text_input!()
+    for f in values(WINDOW_BY_ID)
+        f.host isa WindowState || continue
+        SDL3.TextInputActive(f.host.ptr) && SDL3.StopTextInput(f.host.ptr)
+    end
+    return nothing
+end
+
 """
     focus!(fiber)
 
@@ -377,6 +410,7 @@ rarely set manually.
 function focus!(fiber)
     FOCUSED[] === fiber && return
     FOCUSED[] = fiber
+    sync_text_input!(fiber)
     request_render()
     return nothing
 end
@@ -389,6 +423,7 @@ Clear keyboard focus (events return to the window).
 function unfocus!()
     FOCUSED[] === nothing && return
     FOCUSED[] = nothing
+    stop_all_text_input!()
     request_render()
     return nothing
 end
@@ -567,11 +602,9 @@ function dispatch_event!(event::SDL3.Event)
 
         # Focus follows the press: the nearest fiber handling keyboard events
         # gets them (the window when nothing in the tree handles them).
+        # `focus!` also couples SDL text input activation to the focus.
         focusable = find_focusable(target)
-        if focusable !== FOCUSED[]
-            FOCUSED[] = focusable
-            request_render()
-        end
+        focusable === FOCUSED[] || focus!(focusable)
 
         # Scrollbar arrows step the viewport up/down..
         arrow = find_scrollbar_arrow(target, mx, my)

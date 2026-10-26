@@ -193,8 +193,13 @@ hook order and release backend resources.
 function unmount!(fiber)
     fiber.mounted || return
     fiber.mounted = false
-    # A focused fiber inside the unmounted subtree must release focus.
-    FOCUSED[] !== nothing && inside_subtree(FOCUSED[], fiber) && (FOCUSED[] = nothing)
+    # A focused fiber inside the unmounted subtree must release focus; with it
+    # goes the reason for SDL text input being active.
+    FOCUSED[] !== nothing && inside_subtree(FOCUSED[], fiber) &&
+        begin
+            FOCUSED[] = nothing
+            stop_all_text_input!()
+        end
     for child in fiber.children
         unmount!(child)
     end
