@@ -25,6 +25,7 @@ const ARROW_CURSOR = Ref{SDL3.Cursor}(C_NULL)
 const TEXT_CURSOR = Ref{SDL3.Cursor}(C_NULL)
 const GRAB_CURSOR = Ref{SDL3.Cursor}(C_NULL)      # open hand (pan-ready)
 const GRABBING_CURSOR = Ref{SDL3.Cursor}(C_NULL)  # closed hand (panning)
+const CROSSHAIR_CURSOR = Ref{SDL3.Cursor}(C_NULL) # creation-tool drags
 
 # SDL3 appended GRAB and GRABBING after the pointer names this SDL3.jl
 # binding knows; the enum is ABI-stable (new values are appended, never
@@ -479,6 +480,8 @@ function update_cursor()
             grabbing = SDL3.CreateSystemCursor(_SDL_SYSTEM_CURSOR_GRABBING)
             GRAB_CURSOR[] = grab
             GRABBING_CURSOR[] = grabbing
+            cross = SDL3.CreateSystemCursor(SDL3.SDL_SYSTEM_CURSOR_CROSSHAIR)
+            CROSSHAIR_CURSOR[] = cross
         catch
             # Headless video drivers have no system cursors; the pointer then
             # stays whatever the window manager shows.
@@ -486,25 +489,42 @@ function update_cursor()
         end
         GRAB_CURSOR[] == C_NULL && (GRAB_CURSOR[] = HAND_CURSOR[])
         GRABBING_CURSOR[] == C_NULL && (GRABBING_CURSOR[] = HAND_CURSOR[])
+        CROSSHAIR_CURSOR[] == C_NULL && (CROSSHAIR_CURSOR[] = HAND_CURSOR[])
     end
     cursor = ARROW_CURSOR[]
-    # An actively-pressed fiber that pans (`cursor = :grab`, e.g. a MouseArea
-    # over a canvas) shows the closed grabbing hand wherever the pointer is
-    # until release.
-    grabbing_now = any(get(p.props, :cursor, nothing) === :grab
-                       for (_, p) in ACTIVE_PRESS)
+    # An actively-pressed pan surface (`cursor = :grab`) shows the closed
+    # grabbing hand wherever the pointer is until release; a `:pan` surface
+    # grabs with a non-left button (the workspace's middle-drag) and keeps
+    # the plain arrow for left presses (a selection click is not a grab). A
+    # pressed `:crosshair` is a creation-tool drag.
+    grabbing_now = false
+    crosshair_now = false
+    for ((_, button), pressable) in ACTIVE_PRESS
+        shape = get(pressable.props, :cursor, nothing)
+        if shape === :grab
+            grabbing_now = true
+        elseif shape === :pan
+            grabbing_now |= button != 0x01
+        elseif shape === :crosshair
+            crosshair_now = true
+        end
+    end
     if grabbing_now
         cursor = GRABBING_CURSOR[]
+    elseif crosshair_now
+        cursor = CROSSHAIR_CURSOR[]
     elseif HOVERED_ACTIVE[]
         # A hovered pressable that asks for a text pointer (e.g. a TextBox)
-        # shows the I-beam; one asking to pan shows the open grab hand;
-        # everything else hoverable is a clickable control.
-        wants_text = any(get(p.props, :cursor, nothing) === :text
-                         for p in values(HOVERED))
-        wants_grab = any(get(p.props, :cursor, nothing) === :grab
-                         for p in values(HOVERED))
-        cursor = wants_text ? TEXT_CURSOR[] :
-                 wants_grab ? GRAB_CURSOR[] : HAND_CURSOR[]
+        # shows the I-beam; one asking to pan shows the open grab hand; a
+        # creation-tool surface shows the crosshair; `:pan`/`:arrow`
+        # surfaces keep the plain arrow (only grabbing changes the
+        # pointer); everything else hoverable is a clickable control.
+        hovered = [get(p.props, :cursor, nothing) for p in values(HOVERED)]
+        cursor = :text in hovered ? TEXT_CURSOR[] :
+                 :grab in hovered ? GRAB_CURSOR[] :
+                 :crosshair in hovered ? CROSSHAIR_CURSOR[] :
+                 all(c -> c === :pan || c === :arrow, hovered) ? ARROW_CURSOR[] :
+                 HAND_CURSOR[]
     end
     cursor == C_NULL && return nothing
     try
@@ -596,6 +616,12 @@ function dispatch_event!(event::SDL3.Event)
         mx, my = Float64(mev.x), Float64(mev.y)
         button = Int(mev.button)
         LAST_POINTER[wid] = (mx, my)
+        # A click sees the modifiers held *at click time* (Shift picks up a
+        # multi-select click): refresh the app-visible keymods from SDL.
+        # Mouse events do not update SDL's modifier state, so without this a
+        # Shift that was pressed and released long before would keep
+        # multi-selecting every click until the next key event.
+        LAST_KEYMODS[] = SDL3.GetModState()
         # The first click only dismisses open popup menus (Windows gesture).
         close_open_menus!(wid) && return
         target = hit_test(fiber, mx, my)
@@ -700,24 +726,26 @@ function dispatch_event!(event::SDL3.Event)
         end
         fiber = get(WINDOW_BY_ID, wid, nothing)
         fiber === nothing && (set_hover!(wid, nothing); return)
-        # Holding the pointer down over a text field and dragging extends its
-        # selection (the field's `on_drag` sees pointer positions); a
-        # `MouseArea` with `on_move` gets the same captured moves, so pan/drag
-        # surfaces keep tracking even when the pointer leaves the area.
-        pressed = get(ACTIVE_PRESS, (wid, UInt8(1)), nothing)
-        if pressed !== nothing
+        # Holding any button over a control and dragging keeps feeding the
+        # pressed fiber's on_move/on_drag — press capture ignores which
+        # button is down (a `:pan` pan surface pans with the middle button),
+        # and the moves keep arriving even when the pointer leaves the area.
+        last_pressed = nothing
+        for ((w, _), pressed) in ACTIVE_PRESS
+            w == wid || continue
             lx, ly = _locals(pressed, mx, my)
             callback_press!(pressed.props, :on_move, lx, ly)
             callback_press!(pressed.props, :on_drag, lx, ly)
             (haskey(pressed.props, :on_move) || haskey(pressed.props, :on_drag)) &&
                 mark_window_draw!(wid)
+            last_pressed = pressed
         end
         target = hit_test(fiber, mx, my)
         hovered = find_pressable(target)
         set_hover!(wid, hovered)
         # Plain hover motion: the innermost mouse area under the pointer sees
         # moves that are not already delivered through the press capture.
-        if hovered !== nothing && hovered !== pressed &&
+        if hovered !== nothing && hovered !== last_pressed &&
            haskey(hovered.props, :on_move)
             lx, ly = _locals(hovered, mx, my)
             callback_press!(hovered.props, :on_move, lx, ly)
@@ -787,6 +815,7 @@ function dispatch_event!(event::SDL3.Event)
         fiber === nothing && return
         target = keyboard_target(fiber)
         key = SDL3.GetKeyName(kev.key)
+        LAST_KEYMODS[] = SDL3.GetModState()
         callback(target.props, :on_key_up, key)
     elseif ty == SDL3.SDL_EVENT_TEXT_INPUT
         tev = SDL3.as_text_input(event)

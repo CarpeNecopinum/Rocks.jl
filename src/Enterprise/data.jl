@@ -62,6 +62,7 @@ function TabControl(; tabs = Any[], selected, children = Any[],
         background = t.colors.document,
         border_color = t.colors.border, border_width = 1,
         padding = 12, direction = :column, gap = 6,
+        height = "100%",
         fill = true, stretch_children = true)
     return Element(
         _BOX,

@@ -173,8 +173,11 @@ Props:
     `ScrollView`.
 * `disabled = false` — suppresses all mouse callbacks when true.
 * `cursor` — visible pointer shape while hovered: `:grab` (open hand, closed
-  while pressed — a pan surface), `:text` (I-beam, what `TextBox` uses), or
-  the default pointing hand.
+  while pressed — a pan surface), `:text` (I-beam, what `TextBox` uses),
+  `:pan` (the plain arrow while hovered — no hover cursor change — and the
+  closed grabbing hand while a non-left button is held, the workspace's
+  middle-drag), `:crosshair` (a creation-tool drag), or the default pointing
+  hand.
 * Legacy aliases kept for the existing [`Pressable`](@ref) API —
   `on_press_in` (≈ `on_down`), `on_press` (≈ `on_click`), `on_press_out`,
   `on_drag(x, y)` (called with area-local coordinates while the pointer is

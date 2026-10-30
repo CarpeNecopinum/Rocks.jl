@@ -368,9 +368,12 @@ function create_window!(fiber)
     resizable && (flags |= SDL3.SDL_WINDOW_RESIZABLE)
     if popup
         # Popup menus: borderless, transient, always above the parent —
-        # the window content draws its own bevel border.
-        flags |= SDL3.SDL_WINDOW_BORDERLESS | SDL3.SDL_WINDOW_POPUP_MENU |
-                 SDL3.SDL_WINDOW_ALWAYS_ON_TOP
+        # the window content draws its own bevel border. A plain borderless
+        # window is used instead of SDL's `SDL_WINDOW_POPUP_MENU`: the
+        # renderer of an override-redirect popup aborts the process with an
+        # X BadValue on some X servers (X_GLXCreateContext), and the menu's
+        # dismissal is handled in-app (`close_open_menus!`) anyway.
+        flags |= SDL3.SDL_WINDOW_BORDERLESS | SDL3.SDL_WINDOW_ALWAYS_ON_TOP
     end
     xpos, ypos = window_position(fiber)
     ptr = if popup
@@ -381,21 +384,14 @@ function create_window!(fiber)
         if owner === nothing
             error("a popup window needs an owner window")
         end
-        try
-            SDL3.CreatePopupWindow(owner.host.ptr, xpos, ypos, width, height, flags)
-        catch
-            # Headless video drivers have no transient popup windows; a plain
-            # borderless window at the same place works there.
-            ox, oy = client_origin(owner)
-            plain = try
-                SDL3.CreateWindow(title, width, height,
-                                  flags & ~UInt64(SDL3.SDL_WINDOW_POPUP_MENU))
-            catch err
-                error("SDL3 could not create the window: $(sprint(showerror, err))")
-            end
-            SDL3.SetWindowPosition(plain, ox + xpos, oy + ypos)
-            plain
+        w = try
+            SDL3.CreateWindow(title, width, height, flags)
+        catch err
+            error("SDL3 could not create the window: $(sprint(showerror, err))")
         end
+        ox, oy = client_origin(owner)
+        SDL3.SetWindowPosition(w, ox + xpos, oy + ypos)
+        w
     else
         w = try
             SDL3.CreateWindow(title, width, height, flags)

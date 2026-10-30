@@ -220,27 +220,48 @@ end
 # ---- ContextMenu ----------------------------------------------------------
 
 """
-    Enterprise.ContextMenu(; open, x = 0, y = 0, items = Any[], width = 180)
+    Enterprise.ContextMenu(; open, x = nothing, y = nothing, items = Any[], width = 180)
 
 A popup menu that opens as its own borderless OS window — a child popup of
 the window it is rendered in — so it is never clipped by the edges of that
 window and always paints above every other window's content. `x`/`y` are
-the offset of the menu inside the owner window's client area. `open` is an
-`Observable{Bool}`; item callbacks close it automatically. Clicking elsewhere
-or pressing Escape dismisses it.
+the offset of the menu inside the owner window's client area; omitted (or
+`nothing`) they defer to the window's *last pointer position* — the opening
+click — so a right-click context menu anchors at the pointer with no extra
+state. `open` is an `Observable{Bool}`; item callbacks close it
+automatically. Clicking elsewhere or pressing Escape dismisses it.
 
 ```julia
 @rock E.ContextMenu(open = open, x = 100, y = 120,
                     items = [E.MenuItem(label = "Rename")])
 ```
 """
-function ContextMenu(; open, x = 0, y = 0, items = Any[], width = 180)
+function ContextMenu(; open, x = nothing, y = nothing, items = Any[], width = 180)
     open isa Observable ||
         error("Enterprise.ContextMenu needs an `Observable{Bool}` as `open`")
     t = theme()
     open = @use open
     open[] || return nothing
     close() = (open[] = false)
+    # Default `x`/`y`: the pointer position of the owning window at the
+    # moment of the opening click (what a right-click context menu wants).
+    # The click that flips `open` was already dispatched — `LAST_POINTER`
+    # holds its window coordinates — so the menu anchors at the pointer
+    # without the caller tracking window-space mouse positions. The +2 nudge
+    # keeps the cursor hot pixel off the first menu row.
+    if x === nothing || y === nothing
+        wid = nothing
+        f = CURRENT_FIBER[]
+        while f !== nothing
+            f.host isa WindowState || (f = f.parent; continue)
+            wid = f.host.id
+            break
+        end
+        (mx, my) = wid === nothing ? (0.0, 0.0) :
+                   get(LAST_POINTER, wid, (0.0, 0.0))
+        x === nothing && (x = mx + 2)
+        y === nothing && (y = my + 2)
+    end
     return menu_popup(items, t, close; x = x, y = y, width = width,
                       height = menu_popup_height(items), open = open)
 end

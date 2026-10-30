@@ -251,7 +251,7 @@ function menu_popup(items, t, close; x, y, width, height, open)
         bevel = :raised, radius = 0, padding = 2,
         direction = :column, gap = 0)
     return @rock Window(box;
-        position = :manual, x = Int(x), y = Int(y),
+        position = :manual, x = round(Int,x), y = round(Int,y),
         width = width, height = height,
         popup = true, menu_open = open)
 end

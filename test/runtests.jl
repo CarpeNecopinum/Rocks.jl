@@ -2572,6 +2572,31 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
                 @test count(w -> w.host isa Rocks.WindowState, wins) == 1
             end
 
+            # Default `x`/`y`: the owning window's last pointer position (the
+            # click that opens the menu) — a right-click context menu anchors
+            # at the pointer with no explicit coordinates.
+            pointer_open = Observable(false)
+            function PointerApp()
+                @rock Window(
+                    @rock E.ContextMenu(open = pointer_open,
+                        items = [E.MenuItem(label = "Copy")]);
+                    width = 300, height = 200)
+            end
+            with_tree(PointerApp) do proot
+                powner = sync_windows!(proot)[1]
+                push_mouse!(powner, SDL3.SDL_EVENT_MOUSE_MOTION, 70, 80)
+                drain_events!()
+                pointer_open[] = true
+                Rocks.perform_render!(proot)
+                Rocks.run_effects!()
+                pwins = sync_windows!(proot)
+                pmenu = only(filter(w -> Bool(get(w.props, :popup, false)),
+                                    pwins))
+                # The +2 nudge keeps the cursor hot pixel off the first row.
+                @test get(pmenu.props, :x, 0) == 72
+                @test get(pmenu.props, :y, 0) == 82
+            end
+
             function TipApp()
                 @rock E.ToolTip((@rock E.Button("Hover")); text = "Tip text")
             end

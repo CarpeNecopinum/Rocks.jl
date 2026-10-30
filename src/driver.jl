@@ -32,8 +32,13 @@ function window_of(fiber)
     return window
 end
 
-function push_mouse!(fiber, type, x, y; button = 1, clicks = 1)
+"Press or release a mouse button (`button`: left 1, middle 2, right 3); `mod`
+carries the SDL modifier bits held while it happened (Shift+click)."
+function push_mouse!(fiber, type, x, y; button = 1, clicks = 1, mod = UInt16(0))
     window = window_of(fiber)
+    # Keep SDL's own modifier state in sync: button dispatches read the
+    # click-time modifiers through `SDL_GetModState`.
+    SDL3.SetModState(UInt16(mod))
     push_event!(SDL3.SDL_MouseButtonEvent, type,
                 SDL3.SDL_MouseButtonEvent(
                     Int32(type), UInt32(0), UInt64(0),
@@ -81,6 +86,9 @@ end
 
 "A key event (down or up) carrying `key` and the SDL modifier bits."
 function push_key!(fiber, key; type = SDL3.SDL_EVENT_KEY_DOWN, mod = UInt16(0))
+    # Keep SDL's own modifier state (what `dispatch_event!` reads for
+    # click-time mods) in sync with the synthetic key events.
+    SDL3.SetModState(UInt16(mod))
     push_event!(SDL3.SDL_KeyboardEvent, type,
                 SDL3.SDL_KeyboardEvent(
                     Int32(type), UInt32(0), UInt64(0),
