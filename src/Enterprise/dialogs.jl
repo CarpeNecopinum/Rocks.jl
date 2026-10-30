@@ -97,7 +97,8 @@ tracks window resizes.
 function Form(; menu = nothing, toolbar = nothing, status = nothing,
               children = Any[], overlay = nothing, title = "", width = 900,
               height = 600, resizable = true, padding = 12,
-              on_scroll = nothing)
+              on_scroll = nothing, on_key = nothing, on_key_up = nothing,
+              on_text_input = nothing)
     t = theme()
     # The form is a column flow: the bars auto-size to their contents
     # (+padding) unless a fixed size is set, and the scroll view grows
@@ -153,11 +154,17 @@ function Form(; menu = nothing, toolbar = nothing, status = nothing,
                                 props_dict(:position => :absolute),
                                 Any[overlay])
     end
+    # Keyboard handlers reach the window's `on_key(key)`/`on_key_up(key)`/
+    # `on_text_input(text)` when no field holds focus.
+    window_props = props_dict(:title => title, :width => width, :height => height,
+                              :resizable => resizable, :background => t.colors.window,
+                              :padding => 0, :direction => :column)
+    on_key === nothing || (window_props[:on_key] = on_key)
+    on_key_up === nothing || (window_props[:on_key_up] = on_key_up)
+    on_text_input === nothing || (window_props[:on_text_input] = on_text_input)
     return Element(
         _WINDOW,
-        props_dict(:title => title, :width => width, :height => height,
-                   :resizable => resizable, :background => t.colors.window,
-                   :padding => 0, :direction => :column),
+        window_props,
         Any[menu, toolbar_wrap, scroll, status_wrap, overlay_child],
     )
 end

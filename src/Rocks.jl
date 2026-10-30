@@ -52,6 +52,7 @@ include("runtime.jl")
 include("components.jl")
 include("widgets.jl")
 include("mechanics.jl")
+include("driver.jl")
 include(joinpath("Material3", "Material3.jl"))
 include(joinpath("Enterprise", "Enterprise.jl"))
 
@@ -63,7 +64,14 @@ export @rock, @use, render, quit!, screenshot, request_redraw,
        useEffect, useMemo, useCallback, use_fiber,
        useInterval, useTimeout,
        set_default_font!, load_font,
-       Mechanics
+       Mechanics,
+       # headless diagnostics and testing (src/driver.jl)
+       with_tree, sync_windows!, drain_events!,
+       push_event!, push_mouse!, push_motion!, push_wheel!,
+       push_window_event!, push_key!,
+       fibers, find_fiber, find_fibers,
+       find_kind, collect_kind, find_by_key, find_by_label, collect_by_label,
+       window_of, fiber_center, center_of, click!
 
 import Observables: Observable
 export Observable

@@ -299,8 +299,40 @@ function display_bounds(display)
     end
 end
 
-window_size(fiber) =
-    (Int(get(fiber.props, :width, 800)), Int(get(fiber.props, :height, 600)))
+"True when the window is meant to size itself from its laid-out content."
+is_fit_window(fiber) = Bool(get(fiber.props, :fit_content, false))
+
+"""
+    fit_window_size(fiber) -> (w, h)
+
+The natural content size of a window: its children in the window's flow
+direction, plus the window's `padding` and `gap` props. `fill` children
+measure naturally here — they never see a host to stretch into — so the
+result is the size at which the layout is exactly full. The `width`/`height`
+props are not consulted; `window_size` uses them as per-axis overrides.
+"""
+function fit_window_size(fiber)
+    dir = Symbol(get(fiber.props, :direction, :column))
+    gap = float(get(fiber.props, :gap, 0))
+    pad = float(get(fiber.props, :padding, 0))
+    main = 2pad
+    cross = 0.0
+    for (i, child) in enumerate(collect(flow_children(fiber)))
+        cw, ch = measure!(child)
+        # Swap so `dw` is the main-axis size and `dh` the cross-axis size.
+        dw, dh = dir === :column ? (ch, cw) : (cw, ch)
+        i > 1 && (main += gap)
+        main += dw
+        cross = max(cross, dh)
+    end
+    return cross + 2pad, main
+end
+
+window_size(fiber) = begin
+    fw, fh = is_fit_window(fiber) ? fit_window_size(fiber) :
+             (float(get(fiber.props, :width, 800)), float(get(fiber.props, :height, 600)))
+    (round(Int, get(fiber.props, :width, fw)), round(Int, get(fiber.props, :height, fh)))
+end
 
 # The screen origin of a window's client area: the window position plus its
 # decorations (title bar and frame), which are not part of the client area.

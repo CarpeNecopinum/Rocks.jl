@@ -676,8 +676,16 @@ function dispatch_event!(event::SDL3.Event)
             callback_press!(pressable.props, :on_up, lx, ly, button)
         if pressable.mounted && is_pressable_kind(pressable.kind) &&
            inside(pressable.rect, mx, my) && !Bool(get(pressable.props, :disabled, false))
-            callback_press!(pressable.props, :on_press, lx, ly, button)
-            callback_press!(pressable.props, :on_click, lx, ly, button)
+            # SDL counts consecutive clicks; a double press routes to the
+            # `on_double_press` handler instead of the plain press pair.
+            dbl = Int(mev.clicks) >= 2 ?
+                  get(pressable.props, :on_double_press, nothing) : nothing
+            if dbl !== nothing
+                callback_press!(pressable.props, :on_double_press, lx, ly, button)
+            else
+                callback_press!(pressable.props, :on_press, lx, ly, button)
+                callback_press!(pressable.props, :on_click, lx, ly, button)
+            end
         end
         mark_window_draw!(wid)
         update_cursor()

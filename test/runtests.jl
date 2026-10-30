@@ -8,46 +8,9 @@ import Rocks: Text, Element, Window, Box, Pressable, Row, Column, ScrollView
 # without a display.
 ENV["SDL_VIDEO_DRIVER"] = "dummy"
 
-# Render `app` (a component function) into a fiber tree, run mount effects,
-# call `f(root)` and tear everything down afterwards.
-function with_tree(f, app; kwargs...)
-    Rocks.RUNNING[] = true
-    Rocks.DIRTY[] = true
-    Rocks.init_backend()
-    root = Rocks.create_root(app, values(kwargs))
-    Rocks.perform_render!(root)
-    Rocks.run_effects!()
-    try
-        f(root)
-    finally
-        Rocks.RUNNING[] = false
-        Rocks.unmount!(root)
-        Rocks.shutdown_backend()
-    end
-end
-
-# Create OS windows for all window fibers of the tree and lay them out —
-# what one dirty frame of the render loop does.
-function sync_windows!(root)
-    windows = Rocks.collect_windows!(Rocks.Fiber[], root)
-    for w in windows
-        w.host isa Rocks.WindowState || Rocks.create_window!(w)
-        Rocks.sync_window!(w)
-        Rocks.measure!(w)
-        Rocks.place!(w, 0.0, 0.0)
-    end
-    # Mirror the runtime loop: close OS windows whose fibers left the tree.
-    for (_, f) in collect(pairs(Rocks.WINDOW_BY_ID))
-        f in windows || Rocks.destroy_window!(f)
-    end
-    return windows
-end
-
-drain_events!() = begin
-    for ev in SDL3.PollEvents()
-        Rocks.dispatch_event!(ev)
-    end
-end
+# Synthetic input, tree addressing and drain helpers moved into the package
+# (`Rocks/src/driver.jl`): push_mouse!, push_motion!, …, drain_events!,
+# find_kind, collect_kind, center_of, click!, with_tree, sync_windows!.
 
 # (r, g, b, a) of the pixel at (x, y) of a PNG file.
 function png_pixel(path, x, y)
@@ -55,109 +18,9 @@ function png_pixel(path, x, y)
     return SDL3.ReadSurfacePixel(surf, x - 1, y - 1)
 end
 
-# The first fiber in a subtree whose kind matches, and all of them.
-function find_kind(f, kind)
-    f.kind === kind && return f
-    for c in f.children
-        found = find_kind(c, kind)
-        found !== nothing && return found
-    end
-    return nothing
-end
-
-function collect_kind(f, kind)
-    out = Rocks.Fiber[]
-    f.kind === kind && push!(out, f)
-    for c in f.children
-        append!(out, collect_kind(c, kind))
-    end
-    return out
-end
-
-# SDL3 delivers every event through one 128 byte union. The wrapper keeps
-# the union intact and offers typed views, so a synthetic event is built by
-# storing the concrete payload struct into the event's memory.
-function push_event!(::Type{P}, type::Integer, payload::P) where {P}
-    event = SDL3.SDL_Event(type = type)
-    GC.@preserve event begin
-        unsafe_store!(Ptr{P}(pointer_from_objref(event)), payload)
-    end
-    @assert SDL3.PushEvent(event)
-    return event
-end
-
-function push_mouse!(fiber, type, x, y; button = 1)
-    window = fiber
-    while !Rocks.is_window(window)
-        window = window.parent
-    end
-    push_event!(SDL3.SDL_MouseButtonEvent, type,
-                SDL3.SDL_MouseButtonEvent(
-                    Int32(type), UInt32(0), UInt64(0),
-                    UInt32(window.host.id), UInt32(0),
-                    UInt8(button), true, UInt8(1), UInt8(0),
-                    Float32(x), Float32(y),
-                ))
-    return nothing
-end
-
-function push_motion!(fiber, x, y)
-    window = fiber
-    while !Rocks.is_window(window)
-        window = window.parent
-    end
-    push_event!(SDL3.SDL_MouseMotionEvent, SDL3.SDL_EVENT_MOUSE_MOTION,
-                SDL3.SDL_MouseMotionEvent(
-                    Int32(SDL3.SDL_EVENT_MOUSE_MOTION), UInt32(0), UInt64(0),
-                    UInt32(window.host.id), UInt32(0),
-                    UInt32(0x0001), # left button held
-                    Float32(x), Float32(y), Float32(0), Float32(0),
-                ))
-    return nothing
-end
-
-function push_wheel!(fiber, x, y; dx = 0, dy = -1)
-    window = fiber
-    while !Rocks.is_window(window)
-        window = window.parent
-    end
-    # Wheel events have no coordinates; real gestures follow mouse motion.
-    Rocks.LAST_POINTER[window.host.id] = (Float64(x), Float64(y))
-    push_event!(SDL3.SDL_MouseWheelEvent, SDL3.SDL_EVENT_MOUSE_WHEEL,
-                SDL3.SDL_MouseWheelEvent(
-                    Int32(SDL3.SDL_EVENT_MOUSE_WHEEL), UInt32(0), UInt64(0),
-                    UInt32(window.host.id), UInt32(0),
-                    Float32(dx), Float32(dy), Int32(0),
-                    Float32(0), Float32(0), Int32(dx), Int32(dy),
-                ))
-    return nothing
-end
-
-function push_window_event!(fiber, wev; data1 = 0, data2 = 0)
-    push_event!(SDL3.SDL_WindowEvent, wev,
-                SDL3.SDL_WindowEvent(
-                    Int32(wev), UInt32(0), UInt64(0),
-                    UInt32(fiber.host.id), Int32(data1), Int32(data2),
-                ))
-    return nothing
-end
-
-# A key event (down or up) carrying `key` and the SDL modifier bits.
-function push_key!(fiber, key; type = SDL3.SDL_EVENT_KEY_DOWN, mod = UInt16(0))
-    push_event!(SDL3.SDL_KeyboardEvent, type,
-                SDL3.SDL_KeyboardEvent(
-                    Int32(type), UInt32(0), UInt64(0),
-                    UInt32(fiber.host.id), UInt32(0), Int32(0),
-                    UInt32(key), mod, UInt16(0),
-                    type == SDL3.SDL_EVENT_KEY_DOWN, false,
-                ))
-    return nothing
-end
-
-center_of(fiber) = (
-    round(Int, fiber.rect[1] + fiber.rect[3] / 2),
-    round(Int, fiber.rect[2] + fiber.rect[4] / 2),
-)
+# Synthetic input, tree addressing and drain helpers moved into the package
+# (`Rocks/src/driver.jl`): push_mouse!, push_motion!, …, drain_events!,
+# find_kind, collect_kind, center_of, click!, with_tree, sync_windows!.
 
 fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
 
@@ -962,6 +825,38 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             drain_events!()
             @test wheels == [(0.0, -1.0, 50.0, 20.0)]
         end
+
+        @testset "double press" begin
+            presses = Ref(0)
+            doubles = Ref(0)
+            function DblApp()
+                @rock Window(
+                    @rock MouseArea(; width = 60, height = 30,
+                                    on_press = () -> presses[] += 1,
+                                    on_double_press = () -> doubles[] += 1);
+                    title = "dbl", width = 100, height = 60)
+            end
+            with_tree(DblApp) do root
+                w = sync_windows!(root)[1]
+                # A single press/release: the plain handlers.
+                push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, 20, 10)
+                drain_events!()
+                push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, 20, 10)
+                drain_events!()
+                @test presses[] == 1
+                @test doubles[] == 0
+                # SDL reports the second consecutive press with clicks == 2;
+                # the double press replaces the press/click pair.
+                push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_DOWN, 20, 10,
+                            clicks = 2)
+                drain_events!()
+                push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, 20, 10,
+                            clicks = 2)
+                drain_events!()
+                @test doubles[] == 1
+                @test presses[] == 1
+            end
+        end
     end
 
     @testset "mouse area layout" begin
@@ -1462,6 +1357,127 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             push_mouse!(slider, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, sx, sy)
             drain_events!()
             @test 0.45 <= value[] <= 0.55
+        end
+    end
+
+    @testset "fit-content window" begin
+        # A `fit_content` window sizes itself from its laid-out content;
+        # explicit `width`/`height` props win per axis, and content changes
+        # re-fit the OS window on the next layout pass.
+        tail = Observable(true)
+        function FitApp()
+            t = @use tail
+            @rock Window(
+                (@rock Box(
+                    (@rock Box(; width = 100, height = 40)),
+                    (t[] ? (@rock Box(; width = 80, height = 30)) :
+                           (@rock Box(; width = 10, height = 0)));
+                    direction = :column, gap = 0, fill = true));
+                title = "fit", fit_content = true, width = 140, padding = 6)
+        end
+        Rocks.RUNNING[] = true
+        Rocks.DIRTY[] = true
+        Rocks.init_backend()
+        tree = Rocks.create_root(FitApp, (;))
+        Rocks.perform_render!(tree)
+        try
+            w = sync_windows!(tree)[1]
+            # 40 + 30 stacked, width fixed by the prop, padding 6 all round.
+            @test w.host.width == 140
+            @test w.host.height == 82
+            Rocks.measure!(w)
+            @test w.host.height == 82
+            # Shrink the content: the window follows on the next layout.
+            tail[] = false
+            Rocks.flush_dirty!()
+            Rocks.measure!(w)
+            Rocks.place!(w, 0.0, 0.0)
+            @test w.host.height == 52
+            # The child fills the window interior (width prop minus padding).
+            @test w.children[1].rect[4] == 40
+            @test w.children[1].rect[3] == 128
+        finally
+            Rocks.RUNNING[] = false
+            Rocks.unmount!(tree)
+            Rocks.shutdown_backend()
+        end
+    end
+
+    @testset "nested window stays out of the flow" begin
+        # A dialog window mounted inside a window's element list must not
+        # join the host's flow layout: its pixel size is the window
+        # manager's business, and counting it would squish the host content
+        # (the Cuts/Layers editor used to collapse the workspace).
+        dialog_open = Observable(false)
+        function NestedApp()
+            d = @use dialog_open
+            @rock Window(
+                (@rock Column(
+                    (@rock Box(; width = 100, height = 40)),
+                    (@rock Box(; width = 100, height = 30));
+                    gap = 0),
+                 (d[] ? (@rock Window(@rock Box(; width = 50, height = 20);
+                                      title = "d", fit_content = true)) :
+                       nothing));
+                title = "host", width = 300, height = 200,
+                padding = 0, gap = 0)
+        end
+        with_tree(NestedApp) do root
+            # `Column` is a wrapper component rendering a Box, so the two
+            # content boxes sit one level below the component fiber.
+            content_boxes(windows) =
+                windows[findfirst(w -> !isempty(w.children) &&
+                                       w.children[1].kind === Column,
+                                  windows)].children[1].children[1].children
+            windows = sync_windows!(root)
+            @test length(windows) == 1
+            b1, b2 = content_boxes(windows)
+            @test b1.rect[4] == 40 && b2.rect[4] == 30
+
+            dialog_open[] = true
+            Rocks.flush_dirty!()
+            windows = sync_windows!(root)
+            @test length(windows) == 2       # the dialog became an OS window
+            b1, b2 = content_boxes(windows)
+            # ... and the host content is sized exactly as before — the
+            # mounted window no longer participates in the flow.
+            @test b1.rect[4] == 40 && b2.rect[4] == 30
+        end
+    end
+
+    @testset "tree addressing and click!" begin
+        # The click-through workflow for tests and probes: address a rendered
+        # element by content/kind and drive it through the real event
+        # pipeline — no hand-built coordinates.
+        hits = Ref(0)
+        dbls = Ref(0)
+        function ClickApp()
+            @rock Window(
+                @rock Box(
+                    @rock Pressable(@rock Text("press me");
+                                    on_press = () -> hits[] += 1,
+                                    on_double_press = () -> dbls[] += 1));
+                title = "click", width = 200, height = 100)
+        end
+        with_tree(ClickApp) do root
+            windows = sync_windows!(root)
+            w = windows[1]
+            @test find_by_label(w, "press me") !== nothing
+            @test find_by_label(w, "press me"; exact = false) !== nothing
+            @test find_by_label(w, "nope") === nothing
+            @test find_by_key(w, :nonexistent) === nothing
+            @test length(fibers(w)) > length(fibers(w.children[1]))
+            btn = find_kind(w, Pressable)
+            @test btn !== nothing
+            x, y = click!(btn)
+            @test 0 <= x <= 200 && 0 <= y <= 100
+            drain_events!()
+            @test hits[] == 1
+            click!(btn; clicks = 2)
+            drain_events!()
+            # A double press does not fire the single press again.
+            @test hits[] == 1
+            @test dbls[] == 1
         end
     end
 

@@ -98,8 +98,14 @@ run over the border.
 """
 overflow_hidden(fiber) = Symbol(get(fiber.props, :overflow, :visible)) === :hidden
 
-"Children that participate in flow layout (absolute ones are skipped)."
-flow_children(fiber) = (c for c in fiber.children if !is_absolute_child(c))
+"Children that participate in flow layout: absolute ones and **window
+fibers** are skipped. A nested window element (a dialog, a popup — anything
+that mounts as its own OS window) is a screen surface positioned by the
+window manager, never a layout box; component trees commonly carry those
+alongside the ordinary content in an element list, and counting their pixel
+size in the flow would squish the real content when a dialog opens."
+flow_children(fiber) = (c for c in fiber.children
+                        if !is_absolute_child(c) && !is_window(c))
 
 # ---- flexbox ---------------------------------------------------------------
 #
@@ -311,7 +317,24 @@ function measure!(fiber)
         # user-resized) OS size once created. Their children are measured for
         # placement.
         if fiber.host isa WindowState
-            w, h = float(fiber.host.width), float(fiber.host.height)
+            if Bool(get(fiber.props, :fit_content, false)) &&
+               !Bool(get(fiber.props, :popup, false))
+                # A content-fit window re-checks its natural size on every
+                # layout pass and resizes the OS window when the rendered
+                # content no longer matches it. `window_size` applies the
+                # explicit `width`/`height` props as per-axis overrides.
+                fw, fh = window_size(fiber)
+                state = fiber.host
+                if round(Int, fw) != state.width || round(Int, fh) != state.height
+                    SDL3.SetWindowSize(state.ptr, round(Int, fw), round(Int, fh))
+                    state.width = round(Int, fw)
+                    state.height = round(Int, fh)
+                    state.needs_layout = true
+                end
+                w, h = float(state.width), float(state.height)
+            else
+                w, h = float(fiber.host.width), float(fiber.host.height)
+            end
         else
             w = float(get(fiber.props, :width, 800))
             h = float(get(fiber.props, :height, 600))
