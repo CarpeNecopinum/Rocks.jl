@@ -739,6 +739,75 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         end
     end
 
+    @testset "canvas lines are anti-aliased" begin
+        # A diagonal line over a contrasting background leaves partially
+        # blended pixels along its edges (the feathered RenderGeometry
+        # strip) — SDL's line raster would paint hard pixels there.
+        function AAApp()
+            @rock Window(
+                @rock Canvas(
+                    draw = (ctx) -> begin
+                        ctx.clear((1.0, 1.0, 1.0))
+                        ctx.line(20.0, 20.0, 80.0, 50.0;
+                                 color = (0.0, 0.0, 0.0), width = 1.0)
+                    end,
+                    background = (1.0, 1.0, 1.0), fill = true; flex = 1);
+                title = "aa", width = 100, height = 70)
+        end
+        with_tree(AAApp) do root
+            w = sync_windows!(root)[1]
+            path = joinpath(mktempdir(), "aa.png")
+            Rocks.screenshot(w, path)
+            # The line through (20,20)-(80,50) passes exactly through (50,35)
+            # (full alpha, near black); (50,36) sits ~0.9 px off the centre —
+            # inside the feather, so it blends part-way to the background.
+            core = png_pixel(path, 50, 35)
+            feather = png_pixel(path, 50, 36)
+            @test core[1] < 120
+            @test core[1] + 30 < feather[1] < 250
+            # Well outside the feather the background is untouched.
+            @test png_pixel(path, 50, 40)[1] > 250 - 20
+        end
+    end
+
+    @testset "canvas line batches cache" begin
+        # A `ctx.lines` batch caches its buffers under the caller's `deps`:
+        # a redraw with the same deps re-issues the cached geometry (the
+        # build callback never runs again); new deps rebuild once.
+        rebuilds = Ref(0)
+        version = Ref(0)
+        function BatchApp()
+            @rock Window(
+                @rock Canvas(
+                    draw = (ctx) -> begin
+                        ctx.clear((1.0, 1.0, 1.0))
+                        ctx.lines(:test; deps = version[],
+                                  build = () -> (rebuilds[] += 1;
+                                                 [(10.0, 10.0, 60.0, 40.0,
+                                                   (0.0, 0.0, 0.0), 1.0)]))
+                    end,
+                    background = (1.0, 1.0, 1.0), fill = true; flex = 1);
+                title = "batch", width = 100, height = 70)
+        end
+        with_tree(BatchApp) do root
+            w = sync_windows!(root)[1]
+            Rocks.draw_window!(w)
+            @test rebuilds[] == 1
+            Rocks.draw_window!(w)                  # same deps → re-drawn only
+            @test rebuilds[] == 1
+            version[] = 1
+            Rocks.draw_window!(w)                  # new deps → rebuilt once
+            @test rebuilds[] == 2
+            version[] = 1
+            Rocks.draw_window!(w)
+            @test rebuilds[] == 2
+            # The cached buffers are still drawn.
+            path = joinpath(mktempdir(), "batch.png")
+            Rocks.screenshot(w, path)
+            @test png_pixel(path, 30, 22)[1] < 120
+        end
+    end
+
     @testset "mouse area" begin
         downs = Any[]
         ups = Any[]

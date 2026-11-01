@@ -1057,7 +1057,7 @@ recomputed from scratch like the rest of the tree.
     ctx.clear([color])                 fill the whole canvas with `color` (or transparent)
     ctx.set_color(color)               set the stroke/fill colour for later calls
     ctx.rect(x, y, w, h; color, fill)  stroked or filled rectangle (canvas-local)
-    ctx.line(x1, y1, x2, y2; color, width)   single line segment
+    ctx.line(x1, y1, x2, y2; color, width)   single anti-aliased line segment
     ctx.polyline(pts; color, width, closed)  polyline; pts = iterable of (x, y);
                                              closed loops back to pts[1]
     ctx.polygon(pts; color)            filled polygon (ear-clip free: triangle fan)
@@ -1084,19 +1084,29 @@ between frames: `draw` re-issues every primitive each redraw, so the canvas is
 recomputed from scratch like the rest of the tree.
 
     ctx.clear([color])                     fill the whole canvas with `color` (or transparent)
-    ctx.line(x1,y1, x2,y2; color, width)   single line segment (width>1 → filled quad)
+    ctx.line(x1,y1, x2,y2; color, width)   single anti-aliased line segment
+    ctx.lines(key; deps, build)            one geometry call for a named batch of
+                                           anti-aliased segments (see below)
     ctx.polyline(pts; color, width, closed)  polyline; pts = iterable of (x, y);
                                              closed loops back to pts[1]
     ctx.polygon(pts; color)                filled polygon (triangle fan; convex / fan-decomposed)
     ctx.points(pts; color, size)           filled square dots
     ctx.text(str, x, y; size, color, font) TTF text, top-left at (x, y)
     ctx.texture(tex, x, y; w, h)           blit a caller-supplied SDL3.Texture
+
+`ctx.lines` batches many anti-aliased segments into **one** geometry call:
+`build` returns an iterable of `(x1, y1, x2, y2, color, width)` tuples. The
+built vertex/index buffers are cached per canvas under `key`; while the
+caller's `deps` are `===` to the cached ones, the batch re-issues the cached
+geometry — a shape that didn't move between frames is re-drawn without
+being rebuilt. Returns whether the batch was (re)built.
 """
 struct CanvasContext
     renderer::SDL3.Renderer
     rect::NTuple{4,Float64}
     clear::Function
     line::Function
+    lines::Function
     polyline::Function
     polygon::Function
     points::Function
@@ -1104,40 +1114,81 @@ struct CanvasContext
     texture::Function
 end
 
-# Fill a convex quad with a solid colour. The colour is baked into the
-# vertices via `geometry_color`, because `RenderGeometry` ignores
-# `SetRenderDrawColor`.
-function _canvas_fill_quad(renderer, pts, color)
-    c = geometry_color(color)
-    verts = SDL3.SDL_Vertex[
-        SDL3.SDL_Vertex(SDL3.SDL_FPoint(Float32(p[1]), Float32(p[2])), c,
-                        SDL3.SDL_FPoint(0, 0)) for p in pts]
-    # The vertices arrive in ring order (p1, p2, p3, p4). Triangles must share
-    # the p1-p3 diagonal; reusing the indices (0,1,2,2,1,3) of the gradient
-    # helper (whose vertex order is TL,TR,BL,BR) would split along the wrong
-    # diagonal and leave part of the quad unpainted.
-    SDL3.RenderGeometry(renderer, verts, Cint[0, 1, 2, 0, 2, 3])
-    return nothing
+# Canvas host state: the per-canvas batch caches. A `ctx.lines` batch caches
+# its built vertex/index buffers under a caller key with the caller's `deps`;
+# while `deps` are `===`, the batch re-issues the cached geometry.
+struct CanvasState
+    lines::Dict{Any,Tuple{Any,Vector{SDL3.SDL_Vertex},Vector{Cint}}}
 end
 
 # Build a CanvasContext for one draw pass, closing over the renderer and the
 # canvas origin so all coordinates are canvas-local.
-function make_canvas(renderer, x0, y0, w, h)
+
+# The alpha ramp around a canvas line, in px: the core of `width` px at full
+# alpha fades to transparent over this distance on each side.
+const LINE_FEATHER_PX = 0.75
+
+# Append the anti-aliased strip of one line segment (three quads: left
+# feather, core, right feather) to a shared vertex/index buffer — the core
+# edge at full alpha, the outer edge fading to transparent over the feather.
+# SDL's line raster has no anti-aliasing of its own. `x0`/`y0` shift the
+# canvas-local segment onto the window surface.
+function append_aa_line!(verts, idx, x0, y0, x1, y1, x2, y2, color, width)
+    dx, dy = x2 - x1, y2 - y1
+    len = hypot(dx, dy)
+    len == 0 && return
+    nx, ny = -dy / len, dx / len             # unit normal
+    core = width / 2
+    f = LINE_FEATHER_PX
+    offsets = (-(core + f), -core, core, core + f)
+    alphas = (0.0, 1.0, 1.0, 0.0)
+    base = length(verts)
+    for (off, a) in zip(offsets, alphas)
+        ox, oy = nx * off, ny * off
+        col = geometry_color(color, a)
+        push!(verts, geometry_vertex(SDL3.SDL_FPoint(Float32(x0 + x1 + ox),
+                                                     Float32(y0 + y1 + oy)), col))
+        push!(verts, geometry_vertex(SDL3.SDL_FPoint(Float32(x0 + x2 + ox),
+                                                     Float32(y0 + y2 + oy)), col))
+    end
+    o = Cint(base)
+    append!(idx, Cint[o, o + 1, o + 2, o + 1, o + 3, o + 2,
+                      o + 2, o + 3, o + 4, o + 3, o + 5, o + 4,
+                      o + 4, o + 5, o + 6, o + 5, o + 7, o + 6])
+    return nothing
+end
+
+function make_canvas(renderer, x0, y0, w, h, line_cache)
     function canvas_line(x1, y1, x2, y2; color = nothing, width = 1.0)
-        color !== nothing && set_color(renderer, color)
-        if width <= 1.0
-            SDL3.RenderLine(renderer, x0 + x1, y0 + y1, x0 + x2, y0 + y2)
-        else
-            dx, dy = x2 - x1, y2 - y1
-            len = hypot(dx, dy)
-            if len > 0
-                nx, ny = -dy / len * width / 2, dx / len * width / 2
-                pts = [(x0 + x1 + nx, y0 + y1 + ny), (x0 + x1 - nx, y0 + y1 - ny),
-                       (x0 + x2 - nx, y0 + y2 - ny), (x0 + x2 + nx, y0 + y2 + ny)]
-                _canvas_fill_quad(renderer, pts, something(color, (0, 0, 0)))
-            end
-        end
+        verts = SDL3.SDL_Vertex[]
+        idx = Cint[]
+        append_aa_line!(verts, idx, x0, y0, x1, y1, x2, y2,
+                        something(color, (0, 0, 0)), width)
+        SDL3.RenderGeometry(renderer, verts, idx)
         return nothing
+    end
+    function canvas_lines(key; deps = nothing, build = nothing)
+        # One geometry call for a whole named batch of anti-aliased line
+        # segments (`build` returns `(x1, y1, x2, y2, color, width)` tuples).
+        # While the caller's `deps` are `===` to the cached ones, the batch
+        # re-issues the cached buffers — a shape that didn't move between
+        # frames is re-drawn without being rebuilt. Returns whether the
+        # batch was (re)built.
+        entry = get(line_cache, key, nothing)
+        if entry !== nothing && entry[1] === deps
+            SDL3.RenderGeometry(renderer, entry[2], entry[3])
+            return false
+        end
+        build === nothing && return false
+        verts = SDL3.SDL_Vertex[]
+        idx = Cint[]
+        for s in build()
+            (x1, y1, x2, y2, color, width) = s
+            append_aa_line!(verts, idx, x0, y0, x1, y1, x2, y2, color, width)
+        end
+        line_cache[key] = (deps, verts, idx)
+        SDL3.RenderGeometry(renderer, verts, idx)
+        return true
     end
     function canvas_clear(color = nothing)
         (w <= 0 || h <= 0) && return
@@ -1235,9 +1286,14 @@ function make_canvas(renderer, x0, y0, w, h)
         return nothing
     end
     return CanvasContext(renderer, (x0, y0, w, h), canvas_clear, canvas_line,
-                         canvas_polyline, canvas_polygon, canvas_points,
-                         canvas_text, canvas_texture)
+                         canvas_lines, canvas_polyline, canvas_polygon,
+                         canvas_points, canvas_text, canvas_texture)
 end
+
+# Canvas host state (the batch caches); created with the fiber at mount.
+canvas_lines_cache(fiber) = fiber.host isa CanvasState ? fiber.host.lines :
+    (fiber.host = CanvasState(Dict{Any,Tuple{Any,Vector{SDL3.SDL_Vertex},
+                                             Vector{Cint}}}()); fiber.host.lines)
 
 # Draw a Canvas fiber: its background (like a Box), then the user `draw`
 # callback and any children, all clipped to the canvas content box (honouring
@@ -1259,7 +1315,8 @@ function draw_canvas!(fiber, renderer)
     RENDER_CLIP[renderer] = clip
     try
         if dcb !== nothing
-            ctx = make_canvas(renderer, x + px, y + py, clip.w, clip.h)
+            ctx = make_canvas(renderer, x + px, y + py, clip.w, clip.h,
+                              canvas_lines_cache(fiber))
             dcb(ctx)
         end
         for child in fiber.children

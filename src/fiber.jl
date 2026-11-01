@@ -53,6 +53,8 @@ elseif kind === _SPLIT
     SplitState(0.5, false, (0.0, 0.0, 0.0, 0.0), 0.5, 0.0)
 elseif kind === _SLIDER
     SliderState((0.0, 0.0, 0.0, 0.0))
+elseif kind === _CANVAS
+    CanvasState(Dict{Any,Tuple{Any,Vector{SDL3.SDL_Vertex},Vector{Cint}}}())
 else
     nothing
 end
