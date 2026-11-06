@@ -4,6 +4,15 @@
 const DIRTY = Ref(true)
 const RUNNING = Ref(false)
 
+# A loop iteration (event wait capped at 250 ms + dispatch + render) that
+# takes longer than this many seconds is treated as a freeze recovery:
+# warn, drop the stale queued motion events and collect.
+const FREEZE_WARN_S = 5.0
+
+# A young-generation GC every this many loop iterations keeps the SDL texture
+# and surface finalizers moving without a long stop-the-world later.
+const GC_ITERATIONS = 300
+
 """
     request_render()
 
@@ -190,12 +199,30 @@ function render(app; kwargs...)
     kw = Base.structdiff(kw, (frames = nothing, screenshot = nothing))
     root = create_root(app, kw)
     root.mounted = true
+    # The previous loop iteration's start: an iteration that took much longer
+    # than the 250 ms wait cap stalled (freeze detection).
+    last_iteration = time()
     try
         perform_render!(root)
         run_effects!()
         windows = Fiber[]
         frame = 0
         while RUNNING[]
+            # Freeze detection: an iteration that took longer than a few
+            # seconds — a long GC pause, a debugger breakpoint, a stalled
+            # machine — is followed by a flood of stale queued events
+            # (usually mouse motion). Warn, drop the queued motion events and
+            # collect, so recovery does not re-render for every stale event.
+            now = time()
+            duration = now - last_iteration
+            if duration > FREEZE_WARN_S
+                @warn "Rocks: slow loop iteration detected " *
+                      "($(round(duration, digits = 2))s) — possible freeze recovery"
+                SDL3.FlushEvents(SDL3.SDL_EVENT_MOUSE_MOTION,
+                                 SDL3.SDL_EVENT_MOUSE_MOTION)
+                GC.gc(true)
+            end
+            last_iteration = now
             # Block until the next event or until the next timer is due, so
             # an idle application neither redraws nor burns CPU.
             event = SDL3.WaitEventTimeout(event_wait_timeout_ms())
@@ -258,6 +285,10 @@ function render(app; kwargs...)
                 w.hidden || draw_window!(w)
             end
             frame += 1
+            # Periodic GC management: a young-generation collect every few
+            # hundred iterations keeps the SDL texture and surface finalizers
+            # moving without a long stop-the-world later.
+            frame % GC_ITERATIONS == 0 && GC.gc(false)
             frames isa Integer && frame >= frames && (RUNNING[] = false)
         end
         # Semi-headless runs: capture before the windows are torn down.
