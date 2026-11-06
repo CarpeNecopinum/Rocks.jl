@@ -1255,6 +1255,32 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         @test ticks[] >= 2
     end
 
+    @testset "debug overlay" begin
+        # `render(...; debug = true)` counts the render passes, the fibers
+        # and the window draws, and draws the overlay after the window
+        # content. The flag resets after the run.
+        function App()
+            useTimeout(quit!, 250)
+            useInterval(() -> nothing, 50)
+            @rock Window(@rock Text("debug"); title = "t", width = 200, height = 100)
+        end
+        render(App; debug = true)
+        @test Rocks.DEBUG[] == false
+        @test Rocks.debug_renders[] >= 1
+        @test Rocks.debug_fibers[] >= 3           # window + text fibers
+        @test Rocks.debug_fps[] >= 0
+
+        # A run without the flag keeps the overlay off and the counters at
+        # zero.
+        function PlainApp()
+            useTimeout(quit!, 250)
+            @rock Window(@rock Text("plain"); title = "t", width = 200, height = 100)
+        end
+        render(PlainApp)
+        @test Rocks.DEBUG[] == false
+        @test Rocks.debug_renders[] == 0
+    end
+
     @testset "pointer events" begin
         clicks = Ref(0)
         pressed_log = Ref(0)

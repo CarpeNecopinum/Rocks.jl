@@ -1713,6 +1713,31 @@ Clear the OS window of a window fiber with its background and draw its
 children, then present. [`screenshot`](@ref) draws with `present = false` to
 read the backbuffer before presenting.
 """
+# The debug overlay: window draw statistics in the upper right corner,
+# drawn after the content while `render(...; debug = true)` runs. The text
+# is rendered fresh per draw (a debug aid — no cache needed).
+function draw_debug_overlay!(window_fiber, renderer)
+    text = "fps $(round(debug_fps[], digits = 1)) | " *
+           "renders $(debug_renders[]) | fibers $(debug_fibers[])"
+    font = load_font(default_font(), 12)
+    tw, th = SDL3.TTF_GetStringSize(font, text)
+    pad = 4
+    win_w = window_fiber.rect[3]
+    set_color(renderer, (0.08, 0.08, 0.1))
+    fill_rect(renderer, win_w - tw - 2pad, pad, tw + 2pad, th + 2pad)
+    surface = SDL3.TTF_RenderText_Blended(
+        font, text, SDL3.SDL_Color(230, 230, 235, 255))
+    surface == C_NULL && return
+    texture = SDL3.CreateTextureFromSurface(renderer, surface)
+    SDL3.DestroySurface(surface)
+    texture == C_NULL && return
+    tw, th = SDL3.GetTextureSize(texture)
+    dst = SDL3.FRect(win_w - tw - pad, pad, tw, th)
+    SDL3.RenderTexture(renderer, texture, nothing, dst)
+    SDL3.DestroyTexture(texture)
+    return nothing
+end
+
 function draw_window!(fiber, present::Bool = true)
     state = fiber.host
     state isa WindowState || return
@@ -1722,6 +1747,7 @@ function draw_window!(fiber, present::Bool = true)
     for child in fiber.children
         draw!(child, renderer)
     end
+    DEBUG[] && draw_debug_overlay!(fiber, renderer)
     present && SDL3.RenderPresent(renderer)
     return nothing
 end

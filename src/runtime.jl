@@ -13,6 +13,18 @@ const FREEZE_WARN_S = 5.0
 # and surface finalizers moving without a long stop-the-world later.
 const GC_ITERATIONS = 300
 
+# The debug overlay (`render(...; debug = true)`): window draw statistics
+# drawn in the upper right corner of every window.
+const DEBUG = Ref(false)
+const debug_draws = Ref(0)        # window draws since the last fps sample
+const debug_fps = Ref(0.0)        # draws per second, sampled every 0.5 s
+const debug_last = Ref(0.0)       # the last fps sample time
+const debug_renders = Ref(0)      # component re-render passes (total)
+const debug_fibers = Ref(0)       # fibers in the tree (last pass)
+
+"Count the fibers of a subtree (the debug overlay's tree size)."
+count_fibers(f) = 1 + sum(count_fibers, f.children; init = 0)
+
 """
     request_render()
 
@@ -196,12 +208,17 @@ function render(app; kwargs...)
     kw = values(kwargs)
     frames = get(kw, :frames, nothing)
     shot = get(kw, :screenshot, nothing)
-    kw = Base.structdiff(kw, (frames = nothing, screenshot = nothing))
+    debug = get(kw, :debug, false)
+    kw = Base.structdiff(kw, (frames = nothing, screenshot = nothing,
+                              debug = nothing))
     root = create_root(app, kw)
     root.mounted = true
     # The previous loop iteration's start: an iteration that took much longer
     # than the 250 ms wait cap stalled (freeze detection).
     last_iteration = time()
+    DEBUG[] = debug
+    debug_renders[] = 0
+    debug_last[] = time()
     try
         perform_render!(root)
         run_effects!()
@@ -244,6 +261,10 @@ function render(app; kwargs...)
                 flush_dirty!()   # effects may write state
                 run_effects!()
                 flush_dirty!()
+                DEBUG[] && begin
+                    debug_renders[] += 1
+                    debug_fibers[] = count_fibers(root)
+                end
                 empty!(windows)
                 collect_windows!(windows, root)
                 for w in windows
@@ -283,6 +304,17 @@ function render(app; kwargs...)
                 state.needs_draw || continue
                 state.needs_draw = false
                 w.hidden || draw_window!(w)
+                debug_draws[] += 1
+            end
+            # The debug overlay's draws-per-second sample (every 0.5 s).
+            if DEBUG[]
+                t = time()
+                elapsed = t - debug_last[]
+                if elapsed >= 0.5
+                    debug_fps[] = debug_draws[] / elapsed
+                    debug_draws[] = 0
+                    debug_last[] = t
+                end
             end
             frame += 1
             # Periodic GC management: a young-generation collect every few
@@ -296,6 +328,7 @@ function render(app; kwargs...)
     finally
         unmount!(root)
         RUNNING[] = false
+        DEBUG[] = false
         shutdown_backend()
         empty!(TIMERS)
         empty!(PENDING_EFFECTS)
