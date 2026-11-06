@@ -740,15 +740,18 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
     end
 
     @testset "canvas lines are anti-aliased" begin
-        # A diagonal line over a contrasting background leaves partially
-        # blended pixels along its edges (the feathered RenderGeometry
-        # strip) — SDL's line raster would paint hard pixels there.
+        # A line whose centre sits **between** two pixel columns shares its
+        # coverage across both (partially blended pixels — the feathered
+        # RenderGeometry strip); SDL's line raster would paint one hard
+        # column. A line landing on a pixel column stays crisp.
         function AAApp()
             @rock Window(
                 @rock Canvas(
                     draw = (ctx) -> begin
                         ctx.clear((1.0, 1.0, 1.0))
-                        ctx.line(20.0, 20.0, 80.0, 50.0;
+                        ctx.line(50.5, 10.0, 50.5, 60.0;
+                                 color = (0.0, 0.0, 0.0), width = 1.0)
+                        ctx.line(20.0, 10.0, 20.0, 60.0;
                                  color = (0.0, 0.0, 0.0), width = 1.0)
                     end,
                     background = (1.0, 1.0, 1.0), fill = true; flex = 1);
@@ -758,15 +761,18 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             w = sync_windows!(root)[1]
             path = joinpath(mktempdir(), "aa.png")
             Rocks.screenshot(w, path)
-            # The line through (20,20)-(80,50) passes exactly through (50,35)
-            # (full alpha, near black); (50,36) sits ~0.9 px off the centre —
-            # inside the feather, so it blends part-way to the background.
-            core = png_pixel(path, 50, 35)
-            feather = png_pixel(path, 50, 36)
-            @test core[1] < 120
-            @test core[1] + 30 < feather[1] < 250
-            # Well outside the feather the background is untouched.
-            @test png_pixel(path, 50, 40)[1] > 250 - 20
+            # The between-columns line: the coverage stays within the two
+            # columns (at least one drawn, nothing spilling outward). The
+            # GPU shares it across both; the software renderer may put it in
+            # one — either way the line reads ~1 px.
+            left = png_pixel(path, 50, 35)
+            right = png_pixel(path, 51, 35)
+            @test min(left[1], right[1]) < 120
+            @test png_pixel(path, 49, 35)[1] > 250 - 20
+            @test png_pixel(path, 52, 35)[1] > 250 - 20
+            # The on-column line: one crisp black column.
+            @test png_pixel(path, 20, 35)[1] < 120
+            @test png_pixel(path, 19, 35)[1] > 250 - 20
         end
     end
 
@@ -805,6 +811,20 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             path = joinpath(mktempdir(), "batch.png")
             Rocks.screenshot(w, path)
             @test png_pixel(path, 30, 22)[1] < 120
+        end
+    end
+
+    @testset "text lines clamp to SDL's texture limit" begin
+        fontpath = Rocks.default_font()
+        if fontpath !== nothing
+            font = Rocks.load_font(fontpath, 16)
+            long = "x"^200000            # far over the 16000 px line limit
+            clamped = Rocks.clamp_text_line(font, long)
+            @test clamped != long
+            @test occursin("…", clamped)
+            @test Rocks.text_line_width(font, clamped) <= Rocks.MAX_TEXT_LINE_PX
+            # A short line passes through untouched.
+            @test Rocks.clamp_text_line(font, "short") == "short"
         end
     end
 
@@ -1015,6 +1035,111 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             push_mouse!(w, SDL3.SDL_EVENT_MOUSE_BUTTON_UP, ex, ey)
             drain_events!()
             @test clicks[] == 1
+        end
+    end
+
+    @testset "input clipping (hit side of the render clip stack)" begin
+        # The hit descent mirrors the render clips (draw_scrolled!/
+        # draw_clipped!/draw_canvas!): content clipped away on the render
+        # side is never hittable.
+        import SDL3
+        function ClippedApp()
+            @rock Window(
+                @rock Box(
+                    @rock Pressable(
+                        @rock Text("x");
+                        position = :absolute, x = 0, y = 0,
+                        width = 120, height = 120,
+                        on_press = () -> nothing);
+                    overflow = :hidden, padding = 10,
+                    width = 100, height = 100);
+                title = "clip", width = 200, height = 150)
+        end
+        with_tree(ClippedApp) do root
+            w = sync_windows!(root)[1]
+            # Inside the content box: the child is the target.
+            t = Rocks.hit_test(w, 50.0, 50.0)
+            @test t !== nothing && t.kind === Pressable
+            # In the padding band: draw_clipped! clips the child away there,
+            # so the box itself (its background is drawn across the full
+            # rect) is the target.
+            t = Rocks.hit_test(w, 5.0, 50.0)
+            @test t !== nothing && t.kind === Box
+            # Past the box: the child is clipped away and neither the box nor
+            # the window carries a pressable — a click there does nothing.
+            @test Rocks.find_pressable(Rocks.hit_test(w, 110.0, 50.0)) === nothing
+        end
+
+        # A default (`overflow = :visible`) box draws — and hit-tests — its
+        # subtree unclipped: a child sticking out is hittable outside the box
+        # (the same region the renderer draws).
+        function VisibleApp()
+            @rock Window(
+                @rock Box(
+                    @rock Pressable(
+                        @rock Text("x");
+                        position = :absolute, x = 90, y = 0,
+                        width = 40, height = 40,
+                        on_press = () -> nothing);
+                    width = 80, height = 80);
+                title = "visible", width = 200, height = 150)
+        end
+        with_tree(VisibleApp) do root
+            w = sync_windows!(root)[1]
+            t = Rocks.hit_test(w, 110.0, 20.0)   # outside the box, on the child
+            @test t !== nothing && t.kind === Pressable
+        end
+
+        # A scroll container clips its subtree's hit testing to the viewport:
+        # a point below the viewport never reaches the scrolled content (the
+        # same region draw_scrolled! clips on the render side).
+        function ScrollApp()
+            @rock Window(
+                @rock ScrollView(
+                    @rock Pressable(
+                        @rock Text("tall");
+                        width = 100, height = 300,
+                        on_press = () -> nothing);
+                    width = 100, height = 100);
+                title = "scroll", width = 200, height = 150)
+        end
+        with_tree(ScrollApp) do root
+            w = sync_windows!(root)[1]
+            # Inside the viewport: the child's visible part is the target.
+            t = Rocks.hit_test(w, 50.0, 50.0)
+            @test t !== nothing && t.kind === Pressable
+            # Below the viewport: the child's rect is there, but the clip
+            # prunes it — a click below the viewport does nothing.
+            @test Rocks.find_pressable(Rocks.hit_test(w, 50.0, 150.0)) === nothing
+        end
+
+        # Nested clips compose: an `overflow = :hidden` box tightens the
+        # clip of a scroll container placed inside it.
+        function NestedApp()
+            @rock Window(
+                @rock Box(
+                    @rock ScrollView(
+                        @rock Pressable(
+                            @rock Text("x");
+                            position = :absolute, x = 0, y = 0,
+                            width = 100, height = 100,
+                            on_press = () -> nothing);
+                        width = 100, height = 100;
+                        position = :absolute, x = 0, y = 0);
+                    overflow = :hidden, padding = 20,
+                    width = 100, height = 100);
+                title = "nested", width = 200, height = 150)
+        end
+        with_tree(NestedApp) do root
+            w = sync_windows!(root)[1]
+            # Inside both the scroll viewport and the box's content box.
+            t = Rocks.hit_test(w, 50.0, 50.0)
+            @test t !== nothing && t.kind === Pressable
+            # Inside the scroll viewport but in the box's padding band: the
+            # box's clip prunes the scroll container — the box itself is the
+            # target.
+            t = Rocks.hit_test(w, 10.0, 50.0)
+            @test t !== nothing && t.kind === Box
         end
     end
 

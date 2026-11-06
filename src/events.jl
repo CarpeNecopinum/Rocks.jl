@@ -55,22 +55,60 @@ end
 
 "Deepest fiber whose layout rect contains the point (windows are excluded —
 nested windows are hit-tested through their own OS window)."
-function hit_test(fiber, x, y)
+# ---- input clipping (the hit side of the render clip stack) ---------------
+
+"Intersect the enclosing clip (`nothing` = unclipped) with a container's
+clip rect: nested clips only shrink the effective region, never grow it."
+function intersect_clip(outer, inner)
+    outer === nothing && return inner
+    inner === nothing && return outer
+    (ox, oy, ow, oh) = outer
+    (ix, iy, iw, ih) = inner
+    x1, y1 = max(ox, ix), max(oy, iy)
+    x2, y2 = min(ox + ow, ix + iw), min(oy + oh, iy + ih)
+    return (x1, y1, max(x2 - x1, 0.0), max(y2 - y1, 0.0))
+end
+
+"Whether the pointer is inside the effective clip (`nothing` = unclipped):
+content clipped away on the render side is never a pointer target — the
+input side of the render clip stack, using the same regions
+([`clip_rect_of`](@ref)) so the two can never drift. Keyboard delivery is
+intentionally not governed by the clip: a focused component keeps receiving
+keys when scrolled out of view."
+pointer_in_clip(clip, x, y) =
+    clip === nothing ||
+    (clip[1] <= x < clip[1] + clip[3] && clip[2] <= y < clip[2] + clip[4])
+
+"""
+    hit_test(fiber, x, y, clip = nothing) -> Union{Fiber,Nothing}
+
+The deepest fiber under the window-local point `(x, y)` whose subtree can
+supply a pointer target, or `nothing`. The descent mirrors the render pass:
+scroll containers clip their subtree to the viewport, `overflow = :hidden`
+hosts and Canvases to their content box — content clipped away on the
+render side is never hittable (the input side of the render clip stack, see
+[`clip_rect_of`](@ref)). Windows are excluded — nested windows are
+hit-tested through their own OS window — and keyboard delivery ignores the
+clip entirely (focus, not pointer-ness, routes keys).
+"""
+function hit_test(fiber, x, y, clip = nothing)
+    # The pointer outside the enclosing clip cannot hit this subtree.
+    pointer_in_clip(clip, x, y) || return nothing
     rx, ry, rw, rh = fiber.rect
     inside_parent = !(x < rx || y < ry || x >= rx + rw || y >= ry + rh)
-    # Host fibers represent visible boxes, so they clip by default and an
-    # `:overflow => :visible` consciously punches a hit-test (and rendering)
-    # hole. Component fibers are transparent forwards to their output: their
-    # props come from the call site, where `overflow` is not a meaningful
-    # prop, so hitting a popup that overflows the component's own rect must
-    # still descend into the (typically smaller) output subtree.
-    default_overflow = is_host(fiber.kind) ? :hidden : :visible
-    if !inside_parent && Symbol(get(fiber.props, :overflow, default_overflow)) !== :visible
+    # A popup with `overflow = :visible` consciously punches a hit-test (and
+    # rendering) hole: content may stick out of the fiber's own rect.
+    if !inside_parent && Symbol(get(fiber.props, :overflow, :visible)) !== :visible
         return nothing
     end
+    # The fiber's own clip contribution for the descent, mirroring the render
+    # dispatch: the same regions draw_scrolled!/draw_clipped!/draw_canvas!
+    # clip the children with. The fiber itself (its background) is drawn —
+    # and hittable — across its full rect.
+    child_clip = intersect_clip(clip, clip_rect_of(fiber))
     for child in reverse(fiber.children)
         is_window(child) && continue
-        found = hit_test(child, x, y)
+        found = hit_test(child, x, y, child_clip)
         found !== nothing && return found
     end
     inside_parent || return nothing

@@ -876,6 +876,7 @@ function ensure_text!(fiber, renderer)
             push!(lineheights, 0.0)
             continue
         end
+        line = clamp_text_line(font, line)   # SDL's texture limit
         surface = try
             SDL3.TTF_RenderText_Blended(font, String(line), scolor)
         catch err
@@ -1121,12 +1122,48 @@ struct CanvasState
     lines::Dict{Any,Tuple{Any,Vector{SDL3.SDL_Vertex},Vector{Cint}}}
 end
 
+# ---- text clamping --------------------------------------------------------
+
+# The maximum pixel width of one rendered text line: SDL textures are
+# limited to 32768 px — stay well inside it.
+const MAX_TEXT_LINE_PX = 16000
+
+# Pixel width of `line` rendered with `font` (SDL3_ttf's TTF_GetStringSize).
+function text_line_width(font, line)::Int
+    w = Ref{Cint}(0)
+    h = Ref{Cint}(0)
+    ok = ccall((:TTF_GetStringSize, SDL3.libSDL3_ttf), Bool,
+               (SDL3.TTF_Font, Cstring, Csize_t, Ptr{Cint}, Ptr{Cint}),
+               font, line, sizeof(line), w, h)
+    return ok ? Int(w[]) : 0
+end
+
+"Clamp one text line to `MAX_TEXT_LINE_PX` px with an ellipsis — a longer
+line would produce a surface wider than SDL's texture limit (32768 px)."
+function clamp_text_line(font, line)
+    text_line_width(font, line) <= MAX_TEXT_LINE_PX && return line
+    chars = collect(line)
+    lo, hi = 1, length(chars)
+    while lo < hi
+        mid = (lo + hi + 1) ÷ 2
+        if text_line_width(font, String(chars[1:mid]) * "…") <= MAX_TEXT_LINE_PX
+            lo = mid
+        else
+            hi = mid - 1
+        end
+    end
+    return String(chars[1:lo]) * "…"
+end
+
 # Build a CanvasContext for one draw pass, closing over the renderer and the
 # canvas origin so all coordinates are canvas-local.
 
 # The alpha ramp around a canvas line, in px: the core of `width` px at full
-# alpha fades to transparent over this distance on each side.
-const LINE_FEATHER_PX = 0.75
+# alpha fades to transparent over this distance on each side — a short ramp
+# keeps the line thin (the 50%-coverage contour lands just past the nominal
+# width) while the core stays wide enough for every renderer's pixel-center
+# sampling.
+const LINE_FEATHER_PX = 0.4
 
 # Append the anti-aliased strip of one line segment (three quads: left
 # feather, core, right feather) to a shared vertex/index buffer — the core
@@ -1255,6 +1292,7 @@ function make_canvas(renderer, x0, y0, w, h, line_cache)
         path === nothing && return
         f = load_font(path, max(round(Int, size), 1))
         f == C_NULL && return
+        str = clamp_text_line(f, str)        # SDL's texture limit
         (r, g, b, a) = color === nothing ? (UInt8(0), UInt8(0), UInt8(0), UInt8(255)) :
                         _to_rgba(color)
         surface = try
@@ -1349,12 +1387,14 @@ end
 # rectangle that is currently applied to a renderer.
 const RENDER_CLIP = Dict{SDL3.Renderer,SDL3.Rect}()
 
-# Draw a scroll container's children clipped to its viewport (and to any
-# outer clip, so nested scroll views compose correctly).
-function draw_scrolled!(fiber, renderer)
+# Push `rect` as the renderer's clip (intersected with the enclosing clip),
+# draw the fiber's children, restore the previous clip afterwards. Nested
+# clips compose; returns nothing when the clip is empty — nothing of the
+# subtree is visible, so nothing of it is drawn.
+function draw_children_clipped!(fiber, renderer, rect)
     previous = get(RENDER_CLIP, renderer, nothing)
-    x, y, w, h = fiber.rect
-    clip = SDL3.Rect(round(Int, x), round(Int, y), round(Int, w), round(Int, h))
+    clip = SDL3.Rect(round(Int, rect[1]), round(Int, rect[2]),
+                     round(Int, rect[3]), round(Int, rect[4]))
     previous === nothing || (clip = clip_rect(previous, clip))
     if clip.w <= 0 || clip.h <= 0
         return nothing
@@ -1374,40 +1414,23 @@ function draw_scrolled!(fiber, renderer)
             RENDER_CLIP[renderer] = previous
         end
     end
+    return nothing
+end
+
+# Draw a scroll container's children clipped to its viewport (`clip_rect_of`)
+# and to any outer clip, so nested scroll views compose correctly; the
+# scrollbar is drawn after — and outside — the clipped content so the thumb
+# stays crisp at the viewport edge.
+function draw_scrolled!(fiber, renderer)
+    draw_children_clipped!(fiber, renderer, clip_rect_of(fiber))
     draw_scrollbar!(fiber, renderer)
     return nothing
 end
 
-# Draw the children of a fiber with a clip rectangle applied: they are
-# clipped to the content box of the fiber, so nothing can be drawn outside of
-# it.  The previous clip is restored afterwards, so nested clips compose.
-function draw_clipped!(fiber, renderer)
-    previous = get(RENDER_CLIP, renderer, nothing)
-    x, y, w, h = fiber.rect
-    px, py = padding_of(fiber)
-    clip = SDL3.Rect(round(Int, x + px), round(Int, y + py),
-                     round(Int, max(w - 2px, 0)), round(Int, max(h - 2py, 0)))
-    previous === nothing || (clip = clip_rect(previous, clip))
-    if clip.w <= 0 || clip.h <= 0
-        return nothing
-    end
-    SDL3.SetRenderClipRect(renderer, clip)
-    RENDER_CLIP[renderer] = clip
-    try
-        for child in fiber.children
-            draw!(child, renderer)
-        end
-    finally
-        if previous === nothing
-            SDL3.SetRenderClipRect(renderer, nothing)
-            delete!(RENDER_CLIP, renderer)
-        else
-            SDL3.SetRenderClipRect(renderer, previous)
-            RENDER_CLIP[renderer] = previous
-        end
-    end
-    return nothing
-end
+# Draw the children of a fiber clipped to its content box (`overflow =
+# :hidden`): a control cannot draw outside of the space it was given.
+draw_clipped!(fiber, renderer) =
+    draw_children_clipped!(fiber, renderer, clip_rect_of(fiber))
 
 # Optional scrollbar of a scroll container, drawn after (and outside) the
 # clipped content so the thumb stays crisp at the viewport edge.

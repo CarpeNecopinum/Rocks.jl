@@ -98,6 +98,26 @@ run over the border.
 """
 overflow_hidden(fiber) = Symbol(get(fiber.props, :overflow, :visible)) === :hidden
 
+"""
+    clip_rect_of(fiber) -> Union{Nothing,Tuple{Float64,Float64,Float64,Float64}}
+
+The clip rect a fiber applies to its children, shared by the render pass
+(`draw_scrolled!`/`draw_clipped!`/`draw_canvas!` in backend.jl) and pointer
+hit-testing (`hit_test` in events.jl) so the two can never drift: scroll
+containers clip to their viewport, `overflow = :hidden` hosts and Canvases
+to their content box. `nothing` when the fiber does not clip — the default
+`overflow = :visible` draws, and hit-tests, unclipped.
+"""
+function clip_rect_of(fiber)
+    is_scrollable(fiber) && return fiber.rect
+    if overflow_hidden(fiber) || fiber.kind === _CANVAS
+        x, y, w, h = fiber.rect
+        px, py = padding_of(fiber)
+        return (x + px, y + py, max(w - 2px, 0.0), max(h - 2py, 0.0))
+    end
+    return nothing
+end
+
 "Children that participate in flow layout: absolute ones and **window
 fibers** are skipped. A nested window element (a dialog, a popup — anything
 that mounts as its own OS window) is a screen surface positioned by the
