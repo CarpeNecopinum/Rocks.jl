@@ -139,6 +139,7 @@ mutable struct TextState
     size::Float64
     fontpath::String
     renderer::SDL3.Renderer
+    wrap_width::Union{Nothing,Float64} # the width the lines were wrapped to
     textures::Vector{SDL3.Texture}
     linewidths::Vector{Float64}
     lineheights::Vector{Float64}
@@ -850,19 +851,51 @@ function text_props(fiber)
     return size, color, fontpath
 end
 
+"""
+    wrap_lines(font, content, width) -> Vector{String}
+
+Greedy word wrap of `content` to `width` pixels (TTF-measured): the content
+is split on `'\\n'` first, then packed word by word. A single word wider
+than `width` keeps its own line.
+"""
+function wrap_lines(font, content, width)
+    lines = String[]
+    for raw in split(content, '\n'; keepempty = true)
+        isempty(strip(raw)) && (push!(lines, ""); continue)
+        current = ""
+        for word in split(raw; keepempty = false)
+            candidate = isempty(current) ? String(word) :
+                        current * " " * String(word)
+            w, _ = SDL3.TTF_GetStringSize(font, candidate)
+            if isempty(current) || w <= width
+                current = candidate
+            else
+                push!(lines, current)
+                current = String(word)
+            end
+        end
+        push!(lines, current)
+    end
+    return lines
+end
+
 # (Re)create the cached textures of a text fiber if its props changed.
 function ensure_text!(fiber, renderer)
     content = text_content(fiber)
     size, color, fontpath = text_props(fiber)
+    wrap_width = fiber.wrap_width
     state = fiber.host
     if state isa TextState &&
        state.content == content && state.color == color && state.size == size &&
-       state.fontpath == fontpath && state.renderer == renderer
+       state.fontpath == fontpath && state.renderer == renderer &&
+       state.wrap_width == wrap_width
         return state
     end
     state === nothing || free_text!(state)
     font = load_font(fontpath, max(round(Int, size), 1))
-    lines = split(content, '\n'; keepempty = true)
+    lines = wrap_width === nothing ?
+            split(content, '\n'; keepempty = true) :
+            wrap_lines(font, content, wrap_width)
     textures = SDL3.Texture[]
     linewidths = Float64[]
     lineheights = Float64[]
@@ -898,8 +931,9 @@ function ensure_text!(fiber, renderer)
     end
     advance = max(Float64(SDL3.TTF_GetFontLineSkip(font)),
                   maximum(lineheights; init = 0.0))
-    fiber.host = TextState(content, color, size, fontpath, renderer, textures,
-                           linewidths, lineheights, advance)
+    fiber.host = TextState(content, color, size, fontpath, renderer,
+                           wrap_width, textures, linewidths, lineheights,
+                           advance)
     return fiber.host
 end
 

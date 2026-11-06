@@ -25,6 +25,9 @@ mutable struct Fiber
     # layout (see layout.jl); rect is in window-local coordinates
     measured::Tuple{Float64,Float64}
     rect::Tuple{Float64,Float64,Float64,Float64}
+    # the width a wrapping Text wraps to (layout-computed; see the `wrap`
+    # prop) — the draw renders the same wrapped lines the measure counted
+    wrap_width::Union{Nothing,Float64}
     # backend state: WindowState for windows, TextState for text,
     # PressState for pressables, nothing otherwise
     host::Any
@@ -43,6 +46,7 @@ function Fiber(kind, props, parent)
         false,
         (0.0, 0.0),
         (0.0, 0.0, 0.0, 0.0),
+        nothing,
         initial_host(kind),
     )
 end

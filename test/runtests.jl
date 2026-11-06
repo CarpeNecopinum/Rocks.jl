@@ -2,7 +2,8 @@ using Test
 using Rocks
 using ColorTypes: RGB, RGBA
 import SDL3
-import Rocks: Text, Element, Window, Box, Pressable, Row, Column, ScrollView
+import Rocks: Text, Element, Window, Box, Pressable, Row, Column, ScrollView,
+              load_font, default_font, wrap_lines, TextState, draw_window!
 
 # All GUI-ish tests run against SDL's dummy video driver, so they work
 # without a display.
@@ -561,6 +562,100 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
             col = w.children[1].children[1]
             @test col.children[1].rect[3] == 120
         end
+    end
+
+    @testset "text wrapping (intrinsic measure)" begin
+        # A Text with the `wrap` prop wraps at word boundaries to the width
+        # constraint threaded down from the nearest definite-width ancestor:
+        # the measured height covers the wrapped lines (the box grows) and
+        # the draw renders the same lines.
+        function WrapApp()
+            @rock Window(
+                @rock Box(
+                    @rock Text("one two three four five six seven eight";
+                               wrap = true, size = 16);
+                    width = 200);
+                title = "wrap", width = 400, height = 300)
+        end
+        with_tree(WrapApp) do root
+            w = sync_windows!(root)[1]
+            text = nothing
+            function walk(f)
+                f.kind === Text && (text = f)
+                foreach(c -> walk(c), f.children)
+            end
+            walk(w)
+            (tw, th) = text.measured
+            @test tw <= 200                     # wrapped inside the constraint
+            @test th > 19                       # more than one line
+            @test text.wrap_width == 200.0
+            # The draw renders the same wrapped lines the measure counted.
+            draw_window!(w)
+            state = text.host
+            @test state isa TextState
+            @test length(state.textures) >= 2
+            @test maximum(state.linewidths) <= 200
+            @test state.wrap_width == 200.0
+            # The box grew to the wrapped height.
+            @test w.children[1].measured[2] ≈ th atol = 1.0
+        end
+
+        # `wrap = w` wraps to exactly that many pixels, without needing a
+        # sized ancestor.
+        function FixedWrapApp()
+            @rock Window(
+                @rock Text("one two three four five six seven eight";
+                           wrap = 120.0, size = 16);
+                title = "wrap", width = 400, height = 300)
+        end
+        with_tree(FixedWrapApp) do root
+            w = sync_windows!(root)[1]
+            text = nothing
+            function walk(f)
+                f.kind === Text && (text = f)
+                foreach(c -> walk(c), f.children)
+            end
+            walk(w)
+            (tw, th) = text.measured
+            @test tw <= 120
+            @test th > 19
+            @test text.wrap_width == 120.0
+        end
+
+        # A Text without the `wrap` prop measures naturally (one wide line),
+        # and wrap_lines keeps a too-long word on its own line.
+        function NaturalApp()
+            @rock Window(
+                @rock Box(
+                    @rock Text("one two three four five six seven eight";
+                               size = 16);
+                    width = 200);
+                title = "natural", width = 400, height = 300)
+        end
+        with_tree(NaturalApp) do root
+            w = sync_windows!(root)[1]
+            text = nothing
+            function walk(f)
+                f.kind === Text && (text = f)
+                foreach(c -> walk(c), f.children)
+            end
+            walk(w)
+            @test text.wrap_width === nothing
+            @test text.measured[2] < 40         # single line height
+            # The draw renders the single unwrapped line: the container's
+            # cross clamp bounds the measured width, not the drawn line.
+            draw_window!(w)
+            state = text.host
+            @test length(state.textures) == 1
+            @test state.linewidths[1] > 200     # one wide line, no wrap
+        end
+
+        font = load_font(default_font(), 16)
+        lines = wrap_lines(font, "aa bb cc dd ee", 40.0)
+        @test all(l -> SDL3.TTF_GetStringSize(font, l)[1] <= 40 ||
+                     length(split(l, " ")) == 1, lines)
+        @test wrap_lines(font, "", 100.0) == [""]
+        @test length(wrap_lines(font, "supercalifragilistic", 10.0)) == 1
     end
 
     @testset "padding axes and justify" begin

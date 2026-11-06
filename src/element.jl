@@ -135,7 +135,12 @@ directly: `@rock Text("Count: ", count)`. Multi-line text is written with
 
 Props: `size` (font size in px, default 16), `color`, `font` (path to a TTF
 font; defaults to the auto-discovered system font, see
-[`set_default_font!`](@ref)).
+[`set_default_font!`](@ref)), and `wrap` — the text wraps at word
+boundaries instead of running over its bounds: `wrap = true` wraps to the
+width constraint threaded down from the nearest definite-width ancestor (a
+parent with an explicit `width`), `wrap = w` wraps to exactly `w` pixels.
+The measured height covers the wrapped lines, so a wrapping text inside a
+sized box grows the box instead of overflowing it.
 """
 const Text = _TextKind()
 

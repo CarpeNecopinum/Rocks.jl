@@ -329,9 +329,11 @@ end
     measure!(fiber) -> (width, height)
 
 Compute the measured size of a fiber bottom-up. Fixed `width`/`height` props
-override the natural size.
+override the natural size. `avail_w` is the width constraint threaded down
+from the nearest definite-width ancestor: a Text with the `wrap` prop wraps
+to it (see [`measure_text`](@ref)).
 """
-function measure!(fiber)
+function measure!(fiber, avail_w = nothing)
     if is_window(fiber)
         # Windows size themselves from props, or from their real (possibly
         # user-resized) OS size once created. Their children are measured for
@@ -363,7 +365,7 @@ function measure!(fiber)
             measure!(child)
         end
     elseif is_text(fiber)
-        w, h = measure_text(fiber)
+        w, h = measure_text(fiber, avail_w)
     elseif fiber.kind === _IMAGE
         w, h = measure_image(fiber)
     elseif fiber.kind === _SPLIT
@@ -382,10 +384,13 @@ function measure!(fiber)
     elseif is_host(fiber.kind)
         w, h = measure_box(fiber)
     else
-        # Component fibers stack their output like a gap-less column.
+        # Component fibers stack their output like a gap-less column. A
+        # definite width threads to the children as their available width
+        # (a wrapping Text wraps to it).
+        definite = fixed_length(fiber, :width)
         main, cross = 0.0, 0.0
         for child in flow_children(fiber)
-            cw, ch = measure!(child)
+            cw, ch = measure!(child, definite)
             main += ch
             cross = max(cross, cw)
         end
@@ -406,8 +411,10 @@ function measure!(fiber)
             # Fill children measure their subtree, then stretch to the
             # parent's current size (windows use the real OS size). An
             # explicit width/height still wins, which lets an absolute
-            # full-width app bar keep its 64px height.
-            measure!(child)
+            # full-width app bar keep its 64px height. The parent's width
+            # threads as the child's available width (a wrapping Text wraps
+            # to it).
+            measure!(child, w)
             fw = fixed_length(child, :width)
             fh = fixed_length(child, :height)
             child.measured = (fw === nothing ? w : fw,
@@ -434,13 +441,19 @@ function measure_box(fiber)
     gap = float(get(fiber.props, :gap, 0))
     kids = collect(flow_children(fiber))
     main, cross = dir === :column ? 2py : 2px, 0.0
+    # A definite box width threads to the children as their available width:
+    # a wrapping Text (the `wrap` prop) wraps to it. A box sized from its
+    # children does not constrain them.
+    definite = fixed_length(fiber, :width)
+    child_avail = dir === :column && definite !== nothing ?
+                  max(definite - 2px, 0.0) : nothing
     # Regular children first: they determine the cross size that `fill`
     # children stretch across.
     bases = Float64[]
     margins = Float64[]
     for child in kids
         get(child.props, :fill, false) && continue
-        cw, ch = measure!(child)
+        cw, ch = measure!(child, child_avail)
         base = flex_base(child, dir, dir === :column ? ch : cw)
         push!(bases, base)
         push!(margins, dir === :column ? margin_of(child)[2] : margin_of(child)[1])
@@ -490,12 +503,31 @@ function measure_box(fiber)
     return dir === :column ? (cross + 2px, main) : (main, cross + 2py)
 end
 
-function measure_text(fiber)
+"""
+    measure_text(fiber, avail_w = nothing) -> (width, height)
+
+The natural size of a text fiber's content: the widest `'\\n'` line and the
+line-advance total. With the `wrap` prop set the lines wrap first — to the
+prop's pixel width, or to `avail_w` (the constraint threaded from the
+nearest definite-width ancestor) when the prop is `true` — so the measured
+height covers the wrapped lines and the draw renders the same lines
+(`fiber.wrap_width` records the width both use).
+"""
+function measure_text(fiber, avail_w = nothing)
     content = text_content(fiber)
     isempty(content) && return (0.0, 0.0)
     size, _, fontpath = text_props(fiber)
     font = load_font(fontpath, max(round(Int, size), 1))
-    lines = split(content, '\n'; keepempty = true)
+    wrap = get(fiber.props, :wrap, nothing)
+    # `wrap = true` wraps to the threaded constraint; a number wraps at that
+    # width. (Bool <: Number, so the true case is checked first.)
+    width = wrap === true ?
+            (avail_w !== nothing ? avail_w : nothing) :
+            (wrap isa Real && !(wrap isa Bool) ? float(wrap) : nothing)
+    fiber.wrap_width = width
+    lines = width === nothing ?
+            split(content, '\n'; keepempty = true) :
+            wrap_lines(font, content, width)
     widths, heights = Float64[], Float64[]
     for line in lines
         w, h = SDL3.TTF_GetStringSize(font, String(line))
