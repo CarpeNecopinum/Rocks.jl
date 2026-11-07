@@ -53,6 +53,7 @@ include("components.jl")
 include("widgets.jl")
 include("mechanics.jl")
 include("driver.jl")
+include("benchmark.jl")
 include(joinpath("Material3", "Material3.jl"))
 include(joinpath("Enterprise", "Enterprise.jl"))
 
@@ -67,6 +68,7 @@ export @rock, @use, render, quit!, screenshot, request_redraw,
        Mechanics,
        # headless diagnostics and testing (src/driver.jl)
        with_tree, sync_windows!, drain_events!,
+       benchmark, benchmark_scene, benchmark_and_print,
        push_event!, push_mouse!, push_motion!, push_wheel!,
        push_window_event!, push_key!,
        fibers, find_fiber, find_fibers,

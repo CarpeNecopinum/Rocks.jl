@@ -1255,8 +1255,26 @@ fmt(r) = "(" * join(round.(Int, collect(r)), ", ") * ")"
         @test ticks[] >= 2
     end
 
-    @testset "debug overlay" begin
-        # `render(...; debug = true)` counts the render passes, the fibers
+    @testset "benchmark" begin
+        # The benchmark draws its windows back-to-back (BenchmarkTools:
+        # each sample is a `frames`-frame run) and reports per-frame
+        # timings plus the per-run allocations; a tiny app keeps the test
+        # fast.
+        function TinyApp()
+            @rock Window(@rock Text("bench"); title = "t", width = 200, height = 100)
+        end
+        r = benchmark(TinyApp; frames = 5, samples = 2, seconds = 5.0)
+        @test r.samples == 2
+        @test r.frames == 5
+        @test r.avg_ms > 0
+        @test r.min_ms > 0
+        @test r.fps > 0
+        @test r.max_ms >= r.min_ms
+        @test r.memory >= 0
+        @test r.allocs >= 0
+    end
+
+    @testset "debug overlay" begin        # `render(...; debug = true)` counts the render passes, the fibers
         # and the window draws, and draws the overlay after the window
         # content. The flag resets after the run.
         function App()
