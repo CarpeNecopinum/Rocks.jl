@@ -58,7 +58,8 @@ elseif kind === _SPLIT
 elseif kind === _SLIDER
     SliderState((0.0, 0.0, 0.0, 0.0))
 elseif kind === _CANVAS
-    CanvasState(Dict{Any,Tuple{Any,Vector{SDL3.SDL_Vertex},Vector{Cint}}}())
+    CanvasState(Dict{Any,Tuple{Any,Vector{SDL3.SDL_Vertex},Vector{Cint}}}(),
+                Any[])
 else
     nothing
 end

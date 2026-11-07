@@ -26,12 +26,16 @@ src/
 ├── fiber.jl       # Fiber struct + reconciler (headless-testable)
 ├── layout.jl      # measure/place passes (headless-testable)
 ├── backend.jl     # SDL3 backend: windows, textures, fonts, colors, drawing
+├── gpu.jl         # SDL GPU renderer (render(...; gpu = true)), opt-in
 ├── events.jl      # SDL event routing, hit testing, press/hover/focus tracking
 ├── runtime.jl     # main loop, render entry point, quit!
 ├── components.jl  # Row/Column convenience components
 ├── widgets.jl     # pre-styled components (Button, Checkbox, Toggle, ...)
 ├── mechanics.jl   # Mechanics: vanilla, appearance-prop-driven controls
-└── Material3/     # Material3 submodule: M3-themed components
+├── driver.jl      # synthetic input + tree queries for tests/probes
+├── benchmark.jl   # draw-pass benchmark (Benchmark.md)
+├── Material3/     # Material3 submodule: M3-themed components
+└── Enterprise/    # Enterprise submodule: Winforms-like component set
 ```
 
 Render cycle: SDL events / Observable sets → mark the app dirty → re-render
@@ -88,6 +92,12 @@ timer — an idle application draws nothing.
   Rocks`: users should `import Rocks: Text` (examples show the pattern);
   the entry point is named `render` for this reason, `Rocks.run` is a
   qualified alias.
+- Failed SDL assertions pop up a message box that blocks the process —
+  `init_backend()` installs a printing handler instead (see
+  `.agents/memories/gpu-renderer.md`); opt back in with `ROCKS_SDL_ASSERT=dialog`.
+- `@cfunction` at module level goes stale across precompilation — generate
+  function pointers at runtime (Rocks keeps them in `Ref`s and creates them
+  on first use).
 - `@rock` applies to a *call*: the macro receives `Expr(:call, kind, ...)`
   whose args start with the `Expr(:parameters, ...)` kwargs block (when
   present). Only `name = value` items and `splats...` are props; any other
@@ -104,7 +114,14 @@ timer — an idle application draws nothing.
 
 ## Checklist before committing
 
-- `Pkg.test()` passes (66 tests, headless).
+- `Pkg.test()` passes (591 tests, headless).
+- Renderer work: `benchmark_and_print(; frames = 300)` (SDL) and
+  `benchmark_and_print(; frames = 300, gpu = true)` (GPU, needs a display)
+  stay at or below the `Benchmark.md` tables.
 - New host element: singleton in element.jl + measure/draw dispatch + docs.
 - New hook: hooks.jl with mount/update/unmount semantics + tests.
 - New layout prop: layout.jl (measure + place) and document on `Box`.
+- GPU draw path change: pixel-verify against the SDL renderer (same scene,
+  `SDL_VIDEO_DRIVER=dummy` vs `render(...; gpu = true)`) and see
+  `.agents/memories/gpu-renderer.md` for the SDL_gpu gotchas (descriptor
+  sets, transfer buffer unmap, packed pixel formats).

@@ -180,6 +180,48 @@ end
 
 const BACKEND_INITIALIZED = Ref(false)
 
+# SDL assertions: print into the Julia session instead of popping up a message
+# box window (zenity on Linux) — the default handler blocks headless runs,
+# automated scripts and probes until someone clicks it away.
+#
+# ROCKS_SDL_ASSERT chooses the response:
+#   "abort" (default) — print the failure, terminate the program (SDL's
+#                       recommendation for automation: failed assertions mean
+#                       something is deeply wrong).
+#   "ignore"          — print the failure, keep running (the frame may render
+#                       broken; useful to catch every failure in one probe).
+#   "dialog"          — SDL's default interactive message box.
+const SDL_ASSERTION_RESPONSE = Ref{Cint}(SDL3.SDL_ASSERTION_ABORT)
+
+function sdl_assertion_handler(data::Ptr{SDL3.SDL_AssertData},
+                               userdata::Ptr{Cvoid})::Cint
+    d = unsafe_load(data)
+    condition = d.condition == C_NULL ? "?" : unsafe_string(d.condition)
+    file = d.filename == C_NULL ? "?" : unsafe_string(d.filename)
+    func = d.function_name == C_NULL ? "?" : unsafe_string(d.function_name)
+    @warn "SDL assertion failed" condition file line = d.linenum func
+    return SDL_ASSERTION_RESPONSE[]
+end
+
+# The @cfunction pointer must be generated at runtime (a module-level
+# @cfunction const is serialized by precompilation and stale afterwards);
+# installed on first backend init.
+const SDL_ASSERTION_CFUNCTION = Ref{Ptr{Cvoid}}(C_NULL)
+
+function install_assertion_handler()
+    SDL_ASSERTION_CFUNCTION[] === C_NULL || return
+    response = get(ENV, "ROCKS_SDL_ASSERT", "abort")
+    if response == "dialog"
+        return nothing     # keep SDL's interactive message box
+    end
+    SDL_ASSERTION_RESPONSE[] = response == "ignore" ?
+        SDL3.SDL_ASSERTION_IGNORE : SDL3.SDL_ASSERTION_ABORT
+    SDL_ASSERTION_CFUNCTION[] = @cfunction(sdl_assertion_handler, Cint,
+        (Ptr{SDL3.SDL_AssertData}, Ptr{Cvoid}))
+    SDL3.SetAssertionHandler(SDL_ASSERTION_CFUNCTION[], C_NULL)
+    return nothing
+end
+
 function init_backend()
     BACKEND_INITIALIZED[] && return
     try
@@ -191,6 +233,11 @@ function init_backend()
         SDL3.TTF_Init()
     catch err
         error("SDL3_ttf could not be initialised: $(sprint(showerror, err))")
+    end
+    # Headless assertion handling (opt out with ROCKS_SDL_ASSERT=dialog to get
+    # SDL's interactive message box back).
+    if get(ENV, "ROCKS_SDL_ASSERT", "print") != "dialog"
+        install_assertion_handler()
     end
     BACKEND_INITIALIZED[] = true
     return nothing
@@ -438,7 +485,18 @@ function destroy_window!(fiber)
     fiber.host isa WindowState || return
     state = fiber.host
     delete!(WINDOW_BY_ID, state.id)
-    SDL3.DestroyRenderer(state.renderer)
+    if GPU_MODE[] && GPU_STATE[] !== nothing
+        # A claimed window must be released from the GPU device before it is
+        # destroyed, and the GPU path has no SDL renderer.
+        st = GPU_STATE[]
+        idx = findfirst(==(state.ptr), st.windows)
+        if idx !== nothing
+            SDL3.ReleaseWindowFromGPUDevice(st.device, state.ptr)
+            deleteat!(st.windows, idx)
+        end
+    else
+        SDL3.DestroyRenderer(state.renderer)
+    end
     SDL3.DestroyWindow(state.ptr)
     fiber.host = nothing
     return nothing
@@ -954,23 +1012,26 @@ function ensure_text!(fiber, renderer)
             push!(textures, C_NULL)
             push!(linewidths, 0.0)
             push!(lineheights, 0.0)
-            GPU_MODE[] && push!(gpu_textures, C_NULL)
+            push!(gpu_textures, C_NULL)
             continue
         end
-        texture = SDL3.CreateTextureFromSurface(renderer, surface)
-        SDL3.DestroySurface(surface)
-        tw, th = SDL3.GetTextureSize(texture)
-        push!(textures, texture)
-        push!(linewidths, Float64(tw))
-        push!(lineheights, Float64(th))
-        # The GPU path: the same line's pixels upload to a GPU texture (drawn
-        # with the texture pipeline).
         if GPU_MODE[]
-            push!(gpu_textures,
-                  gpu_texture_from_surface(GPU_STATE[].device, surface))
+            # The GPU path: the line's pixels upload to a GPU texture — the
+            # only texture this line needs (no SDL renderer texture, the GPU
+            # window has none). The size comes from the surface.
+            gpu_texture = gpu_texture_from_surface(GPU_STATE[].device, surface)
+            tw, th = SDL3.SurfaceWidth(surface), SDL3.SurfaceHeight(surface)
+            push!(textures, C_NULL)
+            push!(gpu_textures, gpu_texture)
         else
+            texture = SDL3.CreateTextureFromSurface(renderer, surface)
+            tw, th = SDL3.GetTextureSize(texture)
+            push!(textures, texture)
             push!(gpu_textures, C_NULL)
         end
+        push!(linewidths, Float64(tw))
+        push!(lineheights, Float64(th))
+        SDL3.DestroySurface(surface)
     end
     advance = max(Float64(SDL3.TTF_GetFontLineSkip(font)),
                   maximum(lineheights; init = 0.0))
@@ -984,10 +1045,11 @@ function free_text!(state::TextState)
     for texture in state.textures
         texture != C_NULL && SDL3.DestroyTexture(texture)
     end
-    # The GPU path: release the text's GPU textures.
+    # The GPU path: release the text's GPU textures (checked against the
+    # device state, not the mode, so textures also free across a mode switch).
     for texture in state.gpu_textures
-        (texture !== C_NULL && texture !== nothing) &&
-            GPU_MODE[] && SDL3.ReleaseGPUTexture(GPU_STATE[].device, texture)
+        (texture !== C_NULL && texture !== nothing) && GPU_STATE[] !== nothing &&
+            SDL3.ReleaseGPUTexture(GPU_STATE[].device, texture)
     end
     empty!(state.textures)
     empty!(state.linewidths)
@@ -1097,16 +1159,21 @@ function ensure_image!(fiber, renderer)
     gpu_texture = C_NULL
     surface = image_surface(src)
     if surface != C_NULL
-        texture = SDL3.CreateTextureFromSurface(renderer, surface)
-        if texture == C_NULL
-            @warn "Rocks: could not create texture for image" src
-        else
-            tw, th = SDL3.GetTextureSize(texture)
+        if GPU_MODE[]
+            # The GPU path: only a GPU texture — the window has no SDL
+            # renderer to create one from the surface.
+            gpu_texture = gpu_texture_from_surface(GPU_STATE[].device, surface)
+            tw, th = SDL3.SurfaceWidth(surface), SDL3.SurfaceHeight(surface)
             w, h = Float64(tw), Float64(th)
+        else
+            texture = SDL3.CreateTextureFromSurface(renderer, surface)
+            if texture == C_NULL
+                @warn "Rocks: could not create texture for image" src
+            else
+                tw, th = SDL3.GetTextureSize(texture)
+                w, h = Float64(tw), Float64(th)
+            end
         end
-        # The GPU path: the same image's pixels upload to a GPU texture.
-        GPU_MODE[] && (gpu_texture =
-            gpu_texture_from_surface(GPU_STATE[].device, surface))
     end
     fiber.host = ImageState(texture, gpu_texture, w, h, src, renderer)
     return fiber.host
@@ -1210,7 +1277,27 @@ end
 # while `deps` are `===`, the batch re-issues the cached geometry.
 struct CanvasState
     lines::Dict{Any,Tuple{Any,Vector{SDL3.SDL_Vertex},Vector{Cint}}}
+    # Textures uploaded for the canvas (`ctx.texture` with a `Vector{UInt32}`):
+    # entries `(WeakRef(pixels), w, h, texture)` — keyed per pixels object, a
+    # rebuild replaces the vector, which refreshes the upload; dropped objects
+    # are pruned (and their texture released) on the next draw.
+    textures::Vector{Any}
 end
+
+canvas_state(fiber) = fiber.host isa CanvasState ? fiber.host :
+    (fiber.host = CanvasState(Dict{Any,Tuple{Any,Vector{SDL3.SDL_Vertex},
+                                              Vector{Cint}}}(), Any[]); fiber.host)
+
+canvas_lines_cache(fiber) = canvas_state(fiber).lines
+
+"Release a canvas texture (an SDL texture or a GPU texture, per backend)."
+release_canvas_texture(texture::Ptr{SDL3.SDL_GPUTexture}) = begin
+    (texture != C_NULL && GPU_STATE[] !== nothing) &&
+        SDL3.ReleaseGPUTexture(GPU_STATE[].device, texture)
+    return nothing
+end
+release_canvas_texture(texture::Ptr{SDL3.SDL_Texture}) =
+    (texture != C_NULL && SDL3.DestroyTexture(texture); nothing)
 
 # ---- text clamping --------------------------------------------------------
 
@@ -1285,7 +1372,7 @@ function append_aa_line!(verts, idx, x0, y0, x1, y1, x2, y2, color, width)
     return nothing
 end
 
-function make_canvas(renderer, x0, y0, w, h, line_cache)
+function make_canvas(renderer, x0, y0, w, h, line_cache, texture_cache)
     function canvas_line(x1, y1, x2, y2; color = nothing, width = 1.0)
         verts = SDL3.SDL_Vertex[]
         idx = Cint[]
@@ -1319,15 +1406,9 @@ function make_canvas(renderer, x0, y0, w, h, line_cache)
     end
     function canvas_clear(color = nothing)
         (w <= 0 || h <= 0) && return
-        if color === nothing
-            SDL3.SetRenderDrawBlendMode(renderer, SDL3.SDL_BLENDMODE_BLEND)
-            SDL3.SetRenderDrawColor(renderer, 0, 0, 0, 0)
-        else
-            set_color(renderer, color)
-        end
-        SDL3.RenderFillRect(renderer,
-                            SDL3.FRect(round(Int, x0), round(Int, y0),
-                                       round(Int, w), round(Int, h)))
+        # A transparent clear (color === nothing) erases the canvas to nothing.
+        set_color(renderer, something(color, (0, 0, 0, 0)))
+        fill_rect(renderer, x0, y0, w, h)
         return nothing
     end
     function canvas_polyline(pts; color = nothing, width = 1.0, closed = false)
@@ -1370,9 +1451,7 @@ function make_canvas(renderer, x0, y0, w, h, line_cache)
         color !== nothing && set_color(renderer, color)
         r = size / 2
         for p in pts
-            SDL3.RenderFillRect(renderer,
-                SDL3.FRect(round(Int, x0 + p[1] - r), round(Int, y0 + p[2] - r),
-                           round(Int, size), round(Int, size)))
+            fill_rect(renderer, x0 + p[1] - r, y0 + p[2] - r, size, size)
         end
         return nothing
     end
@@ -1392,10 +1471,19 @@ function make_canvas(renderer, x0, y0, w, h, line_cache)
             C_NULL
         end
         surface == C_NULL && return
+        tw, th = SDL3.SurfaceWidth(surface), SDL3.SurfaceHeight(surface)
+        if GPU_MODE[]
+            # The GPU path: the pixels upload to a GPU texture (the window has
+            # no SDL renderer); it exists for this one draw.
+            texture = gpu_texture_from_surface(GPU_STATE[].device, surface)
+            SDL3.DestroySurface(surface)
+            texture == C_NULL && return
+            gpu_record_texture!(texture, x0 + x, y0 + y, tw, th; own = true)
+            return
+        end
         texture = SDL3.CreateTextureFromSurface(renderer, surface)
         SDL3.DestroySurface(surface)
         texture == C_NULL && return
-        tw, th = SDL3.GetTextureSize(texture)
         SDL3.RenderTexture(renderer, texture, nothing,
                            SDL3.FRect(round(Int, x0 + x), round(Int, y0 + y),
                                       round(Int, tw), round(Int, th)))
@@ -1403,25 +1491,71 @@ function make_canvas(renderer, x0, y0, w, h, line_cache)
         return nothing
     end
     function canvas_texture(tex, x, y; w = nothing, h = nothing)
-        if w === nothing || h === nothing
-            tw, th = SDL3.GetTextureSize(tex)
-            w === nothing && (w = tw)
-            h === nothing && (h = th)
+        if tex isa AbstractVector{UInt32}
+            # Raw ARGB8888 pixels: uploaded to a texture cached per pixels
+            # object (a rebuild replaces the vector, which refreshes the
+            # upload). `w`/`h` are required for raw pixels.
+            (w === nothing || h === nothing) &&
+                error("ctx.texture with raw pixels needs w and h")
+            pw, ph = Int(w), Int(h)
+            pw * ph == length(tex) ||
+                error("ctx.texture: got $(length(tex)) pixels for $(pw)x$(ph)")
+            # Prune entries whose pixels object was dropped by the caller (a
+            # rebuild replaces it) and release their texture.
+            filter!(texture_cache) do e
+                e[1].value !== nothing || (release_canvas_texture(e[4]); false)
+            end
+            idx = findfirst(e -> e[1].value === tex && e[2] == pw && e[3] == ph,
+                            texture_cache)
+            if idx === nothing
+                if GPU_MODE[] && GPU_STATE[] !== nothing
+                    texture = gpu_texture_from_pixels(GPU_STATE[].device,
+                                                      tex, pw, ph)
+                    texture == C_NULL && return
+                else
+                    texture = SDL3.CreateTexture(renderer,
+                        SDL3.SDL_PIXELFORMAT_ARGB8888,
+                        SDL3.SDL_TEXTUREACCESS_STREAMING, pw, ph)
+                    texture == C_NULL && return
+                    SDL3.UpdateTexture(texture, nothing,
+                                       reinterpret(UInt8, tex), Int32(4pw))
+                end
+                push!(texture_cache,
+                      (WeakRef(tex), pw, ph, texture))
+            else
+                texture = texture_cache[idx][4]
+            end
+            # Draw the uploaded texture.
+            if GPU_MODE[]
+                gpu_record_texture!(texture, x0 + x, y0 + y, pw, ph)
+            else
+                SDL3.RenderTexture(renderer, texture, nothing,
+                    SDL3.FRect(round(Int, x0 + x), round(Int, y0 + y),
+                               round(Int, pw), round(Int, ph)))
+            end
+            return nothing
+        else
+            if w === nothing || h === nothing
+                tw, th = SDL3.GetTextureSize(tex)
+                w === nothing && (w = tw)
+                h === nothing && (h = th)
+            else
+                tw, th = w, h
+            end
+            if GPU_MODE[]
+                @warn "Rocks: SDL textures cannot be drawn in GPU mode — pass raw pixels (a Vector{UInt32}) instead"
+                return
+            end
+            SDL3.RenderTexture(renderer, tex, nothing,
+                               SDL3.FRect(round(Int, x0 + x), round(Int, y0 + y),
+                                          round(Int, w), round(Int, h)))
+            return nothing
         end
-        SDL3.RenderTexture(renderer, tex, nothing,
-                           SDL3.FRect(round(Int, x0 + x), round(Int, y0 + y),
-                                      round(Int, w), round(Int, h)))
-        return nothing
     end
     return CanvasContext(renderer, (x0, y0, w, h), canvas_clear, canvas_line,
                          canvas_lines, canvas_polyline, canvas_polygon,
                          canvas_points, canvas_text, canvas_texture)
 end
-
-# Canvas host state (the batch caches); created with the fiber at mount.
-canvas_lines_cache(fiber) = fiber.host isa CanvasState ? fiber.host.lines :
-    (fiber.host = CanvasState(Dict{Any,Tuple{Any,Vector{SDL3.SDL_Vertex},
-                                             Vector{Cint}}}()); fiber.host.lines)
 
 # Draw a Canvas fiber: its background (like a Box), then the user `draw`
 # callback and any children, all clipped to the canvas content box (honouring
@@ -1443,7 +1577,8 @@ function draw_canvas!(fiber, renderer)
     try
         if dcb !== nothing
             ctx = make_canvas(renderer, x + px, y + py, clip.w, clip.h,
-                              canvas_lines_cache(fiber))
+                              canvas_lines_cache(fiber),
+                              canvas_state(fiber).textures)
             dcb(ctx)
         end
         for child in fiber.children
@@ -1470,14 +1605,10 @@ end
 # rectangle that is currently applied to a renderer.
 const RENDER_CLIP = Dict{SDL3.Renderer,SDL3.Rect}()
 
-"Set the renderer's clip rect. On the GPU path this is the scissor of the
-current render pass, tracked in the GPU state."
+"Set the renderer's clip rect. On the GPU path this records a scissor change
+that replays inside the frame-end render pass (tracked in the GPU state)."
 function set_render_clip!(renderer, clip)
-    GPU_MODE[] && begin
-        gpu_set_scissor!(clip)
-        GPU_STATE[].scissor = clip
-        return nothing
-    end
+    GPU_MODE[] && return gpu_record_scissor!(clip)
     SDL3.SetRenderClipRect(renderer, clip)
     RENDER_CLIP[renderer] = clip
     return nothing
@@ -1485,11 +1616,7 @@ end
 
 "Restore the renderer's enclosing clip rect (`nothing` = unclipped)."
 function restore_render_clip!(renderer, previous)
-    GPU_MODE[] && begin
-        gpu_set_scissor!(previous)
-        GPU_STATE[].scissor = previous
-        return nothing
-    end
+    GPU_MODE[] && return gpu_record_scissor!(previous)
     if previous === nothing
         SDL3.SetRenderClipRect(renderer, nothing)
         delete!(RENDER_CLIP, renderer)
@@ -1816,7 +1943,8 @@ function draw_debug_overlay!(window_fiber, renderer)
         texture = gpu_texture_from_surface(GPU_STATE[].device, surface)
         SDL3.DestroySurface(surface)
         texture == C_NULL && return
-        gpu_record_texture!(texture, win_w - tw - pad, pad, tw, th)
+        # The texture exists for this one draw — released at frame end.
+        gpu_record_texture!(texture, win_w - tw - pad, pad, tw, th; own = true)
         return
     end
     texture = SDL3.CreateTextureFromSurface(renderer, surface)
@@ -1834,11 +1962,13 @@ function draw_window!(fiber, present::Bool = true)
     state isa WindowState || return
     if GPU_MODE[]
         # The GPU path: the frame records into the staging buffer and
-        # presents through the swapchain.
+        # presents through the swapchain. The debug overlay is part of the
+        # recorded frame (drawn fresh per draw).
         gpu_begin_frame(fiber) || return
         for child in fiber.children
             draw!(child, state.renderer)
         end
+        DEBUG[] && draw_debug_overlay!(fiber, state.renderer)
         gpu_end_frame(get(fiber.props, :background,
                           DEFAULT_WINDOW_BACKGROUND))
         return
@@ -1893,6 +2023,15 @@ function screenshot(window, path::AbstractString)
     state = fiber.host
     w, h = SDL3.GetWindowSize(state.ptr)
     w, h = max(Int(w), 1), max(Int(h), 1)
+    if GPU_MODE[]
+        # The GPU path: the swapchain cannot be read with
+        # SDL_RenderReadPixels — the next drawn frame is copied out to `path`
+        # instead (see GPU_CAPTURE in gpu.jl). The frame presents on the
+        # screen as usual.
+        GPU_CAPTURE[] = String(path)
+        draw_window!(fiber)
+        return path
+    end
     # Redraw without presenting so the backbuffer holds the current frame,
     # read it, then present the redrawn frame.
     draw_window!(fiber, false)

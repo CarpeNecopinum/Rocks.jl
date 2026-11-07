@@ -241,9 +241,11 @@ function render(app; kwargs...)
             # machine — is followed by a flood of stale queued events
             # (usually mouse motion). Warn, drop the queued motion events and
             # collect, so recovery does not re-render for every stale event.
+            # The first iteration is skipped: it compiles the application and
+            # always takes seconds on first use, which is not a freeze.
             now = time()
             duration = now - last_iteration
-            if duration > FREEZE_WARN_S
+            if frame > 0 && duration > FREEZE_WARN_S
                 @warn "Rocks: slow loop iteration detected " *
                       "($(round(duration, digits = 2))s) — possible freeze recovery"
                 SDL3.FlushEvents(SDL3.SDL_EVENT_MOUSE_MOTION,

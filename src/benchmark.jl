@@ -6,7 +6,8 @@ using BenchmarkTools
 
 using ..Rocks: Fiber, WindowState, collect_windows!, create_window!,
                sync_window!, measure!, place!, draw_window!, init_backend,
-               shutdown_backend, RUNNING, DIRTY
+               shutdown_backend, RUNNING, DIRTY, GPU_MODE, gpu_init,
+               gpu_shutdown
 
 """
     benchmark_scene() -> Element
@@ -83,7 +84,8 @@ end
 
 """
     benchmark(app = benchmark_scene; frames = 300, samples = 5,
-              seconds = 30.0, width = 1180, height = 800) -> NamedTuple
+              seconds = 30.0, width = 1180, height = 800, gpu = false)
+        -> NamedTuple
 
 Draw `app`'s windows back-to-back with
 [BenchmarkTools](https://juliaci.github.io/BenchmarkTools.jl/stable/): each
@@ -94,13 +96,26 @@ allocations of one back-to-back run — a draw pass that allocates per frame
 is a regression signal. The layout runs once up front; the benchmark
 measures the **draw pass** (clear, geometry, textures, present), which is
 the cost a renderer transition must not regress.
+
+`gpu = true` benchmarks the SDL GPU path (`render(...; gpu = true)`); it
+needs a Vulkan-capable environment with a display (the GPU swapchain needs a
+window system) and falls back to the SDL renderer with a warning otherwise.
 """
 function benchmark(app = benchmark_scene; frames = 300, samples = 5,
-                   seconds = 30.0, width = 1180, height = 800)
+                   seconds = 30.0, width = 1180, height = 800, gpu = false)
     RUNNING[] && error("Rocks.benchmark is already running")
     RUNNING[] = true
     DIRTY[] = false
     init_backend()
+    GPU_MODE[] = gpu
+    if gpu
+        try
+            gpu_init()
+        catch err
+            @warn "Rocks: SDL GPU unavailable — benchmarking the SDL renderer" exception = err
+            GPU_MODE[] = false
+        end
+    end
     root = create_root(app, (;))
     root.mounted = true
     try
@@ -142,6 +157,8 @@ function benchmark(app = benchmark_scene; frames = 300, samples = 5,
     finally
         unmount!(root)
         RUNNING[] = false
+        GPU_MODE[] && gpu_shutdown()
+        GPU_MODE[] = false
         shutdown_backend()
     end
 end

@@ -142,6 +142,23 @@ end
 - `Rocks.Mechanics` holds the vanilla, appearance-prop-driven controls the M3
   components build on — use them for unstyled but complete behavior.
 
+## Canvas (escape hatch)
+
+`@rock Canvas(; draw = ctx -> ..., width, height, fill = false)` exposes raw
+2D drawing through a context: `ctx.clear(color)`, `ctx.line/polyline/polygon`
+(`; color, width`), `ctx.points(pts; color, size)`, `ctx.text(str, x, y;
+size, color, font)` and `ctx.texture(tex, x, y; w, h)`. Coordinates are
+canvas-local; the drawing is clipped to the canvas content box.
+
+For backend portability (SDL and GPU renderers): pass **raw pixels** to
+`ctx.texture` — a `Vector{UInt32}` in `SDL_PIXELFORMAT_ARGB8888` packing plus
+`w`/`h` (the upload is cached per pixels object; rebuild the vector to
+refresh). SDL texture handles cannot be drawn on the GPU backend.
+
+A Canvas inside a flow parent has zero cross-size unless `width`/`height`
+are set (or the parent sizes it) — with no size, the `draw` callback never
+runs.
+
 ## Testing apps
 
 Headless (no display needed): set `ENV["SDL_VIDEO_DRIVER"] = "dummy"` before
@@ -154,3 +171,8 @@ to a PNG — the pixels come from the renderer's backbuffer, so this works
 headlessly too (`SDL_VIDEO_DRIVER=dummy` renders real pixels; no Xvfb needed).
 Semi-headless runs: `render(App; frames = N, screenshot = path)` runs `N`
 frames and captures the first window before shutting down.
+
+Failed SDL assertions print into the session and terminate (no message box):
+the response is chosen with `ROCKS_SDL_ASSERT` — "abort" (default),
+"ignore" (print and keep running) or "dialog" (SDL's interactive box). See
+`.agents/memories/gpu-renderer.md`.
