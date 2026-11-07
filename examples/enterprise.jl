@@ -319,6 +319,6 @@ if abspath(PROGRAM_FILE) == @__FILE__
     if haskey(ENV, "ROCKS_SCREENSHOT")
         render(App; frames = 1, screenshot = ENV["ROCKS_SCREENSHOT"])
     else
-        render(App)
+        render(App; gpu = true)
     end
 end

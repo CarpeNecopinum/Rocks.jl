@@ -141,6 +141,9 @@ mutable struct TextState
     renderer::SDL3.Renderer
     wrap_width::Union{Nothing,Float64} # the width the lines were wrapped to
     textures::Vector{SDL3.Texture}
+    # The GPU path: the same lines as GPU textures (Ptr{SDL_GPUTexture}),
+    # parallel to `textures`
+    gpu_textures::Vector{Any}
     linewidths::Vector{Float64}
     lineheights::Vector{Float64}
     advance::Float64 # baseline-to-baseline distance for multi-line text
@@ -153,6 +156,8 @@ end
 
 mutable struct ImageState
     texture::SDL3.Texture
+    # The GPU path: the same image's pixels as a GPU texture
+    gpu_texture::Any
     w::Float64 # natural size of the loaded image
     h::Float64
     src::String
@@ -402,6 +407,18 @@ function create_window!(fiber)
         SDL3.SetWindowPosition(w, xpos, ypos)
         w
     end
+    if GPU_MODE[]
+        # The GPU path: no SDL renderer — the window is claimed by the GPU
+        # device and rendered through the swapchain.
+        renderer = SDL3.Renderer()
+        state = WindowState(ptr, renderer, SDL3.GetWindowID(ptr), width, height,
+                            true, false, nothing)
+        fiber.host = state
+        WINDOW_BY_ID[state.id] = fiber
+        gpu_claim(ptr)
+        popup && SDL3.RaiseWindow(ptr)
+        return state
+    end
     renderer = try
         SDL3.CreateRenderer(ptr, "")
     catch err
@@ -448,12 +465,14 @@ end
 # ---- drawing helpers -----------------------------------------------------
 
 function set_color(renderer, color)
+    GPU_MODE[] && return gpu_set_color!(_to_rgba(color))
     r, g, b, a = _to_rgba(color)
     SDL3.SetRenderDrawColor(renderer, r, g, b, a)
     return nothing
 end
 
 function fill_rect(renderer, x, y, w, h)
+    GPU_MODE[] && return gpu_record_fill_rect!(x, y, w, h)
     (w <= 0 || h <= 0) && return
     SDL3.RenderFillRect(renderer,
                         SDL3.FRect(round(Int, x), round(Int, y),
@@ -562,7 +581,7 @@ function fill_gradient_rect(renderer, x, y, w, h, g::LinearGradient)
         geometry_vertex(SDL3.SDL_FPoint(x + w, y + h), br),
     ]
     indices = Cint[0, 1, 2, 2, 1, 3]
-    SDL3.RenderGeometry(renderer, vertices, indices)
+    render_geometry(renderer, vertices, indices)
     return nothing
 end
 
@@ -596,7 +615,7 @@ function fill_triangle!(renderer, x, y, w, h, color; pointing = :up)
     end
     vertices = [geometry_vertex(p, c) for p in points]
     indices = Cint[0, 1, 2]
-    SDL3.RenderGeometry(renderer, vertices, indices)
+    render_geometry(renderer, vertices, indices)
     return nothing
 end
 
@@ -638,7 +657,7 @@ function fill_round_rect(renderer, x, y, w, h, r, color)
         push!(indices, Cint(0), Cint(i), Cint(j))
     end
     push_rim_band!(indices, m, 1, m + 1)
-    SDL3.RenderGeometry(renderer, vertices, indices)
+    render_geometry(renderer, vertices, indices)
     return nothing
 end
 
@@ -675,7 +694,7 @@ function fill_round_rect_gradient(renderer, x, y, w, h, r, g::LinearGradient)
         push!(indices, Cint(0), Cint(i), Cint(j))
     end
     push_rim_band!(indices, m, 1, m + 1)
-    SDL3.RenderGeometry(renderer, vertices, indices)
+    render_geometry(renderer, vertices, indices)
     return nothing
 end
 
@@ -716,7 +735,7 @@ function ring_round_rect(renderer, x, y, w, h, r, bw, color)
     push_rim_band!(indices, m, 0, m)      # outer edge fringe
     push_rim_band!(indices, m, 0, 2m)     # solid border
     push_rim_band!(indices, m, 2m, 3m)    # inner (hole) edge fringe
-    SDL3.RenderGeometry(renderer, vertices, indices)
+    render_geometry(renderer, vertices, indices)
     return nothing
 end
 
@@ -726,6 +745,20 @@ function draw_rect_stroke(renderer, x, y, w, h, border_width)
     fill_rect(renderer, x, y + h - bw, w, bw)  # bottom
     fill_rect(renderer, x, y, bw, h)           # left
     fill_rect(renderer, x + w - bw, y, bw, h)  # right
+    return nothing
+end
+
+"""
+    render_geometry(renderer, vertices, indices)
+
+Draw arbitrary colored vertices — the tessellated shapes. On the GPU path
+the vertices stage through the per-frame transfer buffer; otherwise
+`SDL_RenderGeometry`.
+"""
+function render_geometry(renderer, vertices::Vector{SDL3.SDL_Vertex},
+                         indices::Vector{Cint})
+    GPU_MODE[] && return gpu_record_geometry!(vertices, indices)
+    SDL3.RenderGeometry(renderer, vertices, indices)
     return nothing
 end
 
@@ -893,6 +926,7 @@ function ensure_text!(fiber, renderer)
     end
     state === nothing || free_text!(state)
     font = load_font(fontpath, max(round(Int, size), 1))
+    gpu_textures = Any[]
     lines = wrap_width === nothing ?
             split(content, '\n'; keepempty = true) :
             wrap_lines(font, content, wrap_width)
@@ -920,6 +954,7 @@ function ensure_text!(fiber, renderer)
             push!(textures, C_NULL)
             push!(linewidths, 0.0)
             push!(lineheights, 0.0)
+            GPU_MODE[] && push!(gpu_textures, C_NULL)
             continue
         end
         texture = SDL3.CreateTextureFromSurface(renderer, surface)
@@ -928,18 +963,31 @@ function ensure_text!(fiber, renderer)
         push!(textures, texture)
         push!(linewidths, Float64(tw))
         push!(lineheights, Float64(th))
+        # The GPU path: the same line's pixels upload to a GPU texture (drawn
+        # with the texture pipeline).
+        if GPU_MODE[]
+            push!(gpu_textures,
+                  gpu_texture_from_surface(GPU_STATE[].device, surface))
+        else
+            push!(gpu_textures, C_NULL)
+        end
     end
     advance = max(Float64(SDL3.TTF_GetFontLineSkip(font)),
                   maximum(lineheights; init = 0.0))
     fiber.host = TextState(content, color, size, fontpath, renderer,
-                           wrap_width, textures, linewidths, lineheights,
-                           advance)
+                           wrap_width, textures, gpu_textures, linewidths,
+                           lineheights, advance)
     return fiber.host
 end
 
 function free_text!(state::TextState)
     for texture in state.textures
         texture != C_NULL && SDL3.DestroyTexture(texture)
+    end
+    # The GPU path: release the text's GPU textures.
+    for texture in state.gpu_textures
+        (texture !== C_NULL && texture !== nothing) &&
+            GPU_MODE[] && SDL3.ReleaseGPUTexture(GPU_STATE[].device, texture)
     end
     empty!(state.textures)
     empty!(state.linewidths)
@@ -1029,7 +1077,10 @@ end
 
 function free_image!(state::ImageState)
     state.texture != C_NULL && SDL3.DestroyTexture(state.texture)
+    (state.gpu_texture !== C_NULL && state.gpu_texture !== nothing) &&
+        GPU_MODE[] && SDL3.ReleaseGPUTexture(GPU_STATE[].device, state.gpu_texture)
     state.texture = C_NULL
+    state.gpu_texture = C_NULL
     state.renderer = C_NULL
     return nothing
 end
@@ -1043,6 +1094,7 @@ function ensure_image!(fiber, renderer)
     end
     state === nothing || free_image!(state)
     texture, w, h = C_NULL, 0.0, 0.0
+    gpu_texture = C_NULL
     surface = image_surface(src)
     if surface != C_NULL
         texture = SDL3.CreateTextureFromSurface(renderer, surface)
@@ -1052,8 +1104,11 @@ function ensure_image!(fiber, renderer)
             tw, th = SDL3.GetTextureSize(texture)
             w, h = Float64(tw), Float64(th)
         end
+        # The GPU path: the same image's pixels upload to a GPU texture.
+        GPU_MODE[] && (gpu_texture =
+            gpu_texture_from_surface(GPU_STATE[].device, surface))
     end
-    fiber.host = ImageState(texture, w, h, src, renderer)
+    fiber.host = ImageState(texture, gpu_texture, w, h, src, renderer)
     return fiber.host
 end
 
@@ -1067,6 +1122,7 @@ function draw_image!(fiber, renderer)
         return
     end
     dst = SDL3.FRect(round(Int, x), round(Int, y), round(Int, w), round(Int, h))
+    GPU_MODE[] && return gpu_record_texture!(state.gpu_texture, x, y, w, h)
     SDL3.RenderTexture(renderer, state.texture, nothing, dst)
     return nothing
 end
@@ -1235,7 +1291,7 @@ function make_canvas(renderer, x0, y0, w, h, line_cache)
         idx = Cint[]
         append_aa_line!(verts, idx, x0, y0, x1, y1, x2, y2,
                         something(color, (0, 0, 0)), width)
-        SDL3.RenderGeometry(renderer, verts, idx)
+        render_geometry(renderer, verts, idx)
         return nothing
     end
     function canvas_lines(key; deps = nothing, build = nothing)
@@ -1247,7 +1303,7 @@ function make_canvas(renderer, x0, y0, w, h, line_cache)
         # batch was (re)built.
         entry = get(line_cache, key, nothing)
         if entry !== nothing && entry[1] === deps
-            SDL3.RenderGeometry(renderer, entry[2], entry[3])
+            render_geometry(renderer, entry[2], entry[3])
             return false
         end
         build === nothing && return false
@@ -1258,7 +1314,7 @@ function make_canvas(renderer, x0, y0, w, h, line_cache)
             append_aa_line!(verts, idx, x0, y0, x1, y1, x2, y2, color, width)
         end
         line_cache[key] = (deps, verts, idx)
-        SDL3.RenderGeometry(renderer, verts, idx)
+        render_geometry(renderer, verts, idx)
         return true
     end
     function canvas_clear(color = nothing)
@@ -1307,7 +1363,7 @@ function make_canvas(renderer, x0, y0, w, h, line_cache)
         for i in 2:n-1
             push!(idx, 0, Cint(i - 1), Cint(i))
         end
-        SDL3.RenderGeometry(renderer, verts, idx)
+        render_geometry(renderer, verts, idx)
         return nothing
     end
     function canvas_points(pts; color = nothing, size = 3.0)
@@ -1383,8 +1439,7 @@ function draw_canvas!(fiber, renderer)
     if clip.w <= 0 || clip.h <= 0
         return nothing
     end
-    SDL3.SetRenderClipRect(renderer, clip)
-    RENDER_CLIP[renderer] = clip
+    set_render_clip!(renderer, clip)
     try
         if dcb !== nothing
             ctx = make_canvas(renderer, x + px, y + py, clip.w, clip.h,
@@ -1395,13 +1450,7 @@ function draw_canvas!(fiber, renderer)
             draw!(child, renderer)
         end
     finally
-        if previous === nothing
-            SDL3.SetRenderClipRect(renderer, nothing)
-            delete!(RENDER_CLIP, renderer)
-        else
-            SDL3.SetRenderClipRect(renderer, previous)
-            RENDER_CLIP[renderer] = previous
-        end
+        restore_render_clip!(renderer, previous)
     end
     return nothing
 end
@@ -1421,6 +1470,36 @@ end
 # rectangle that is currently applied to a renderer.
 const RENDER_CLIP = Dict{SDL3.Renderer,SDL3.Rect}()
 
+"Set the renderer's clip rect. On the GPU path this is the scissor of the
+current render pass, tracked in the GPU state."
+function set_render_clip!(renderer, clip)
+    GPU_MODE[] && begin
+        gpu_set_scissor!(clip)
+        GPU_STATE[].scissor = clip
+        return nothing
+    end
+    SDL3.SetRenderClipRect(renderer, clip)
+    RENDER_CLIP[renderer] = clip
+    return nothing
+end
+
+"Restore the renderer's enclosing clip rect (`nothing` = unclipped)."
+function restore_render_clip!(renderer, previous)
+    GPU_MODE[] && begin
+        gpu_set_scissor!(previous)
+        GPU_STATE[].scissor = previous
+        return nothing
+    end
+    if previous === nothing
+        SDL3.SetRenderClipRect(renderer, nothing)
+        delete!(RENDER_CLIP, renderer)
+    else
+        SDL3.SetRenderClipRect(renderer, previous)
+        RENDER_CLIP[renderer] = previous
+    end
+    return nothing
+end
+
 # Push `rect` as the renderer's clip (intersected with the enclosing clip),
 # draw the fiber's children, restore the previous clip afterwards. Nested
 # clips compose; returns nothing when the clip is empty — nothing of the
@@ -1433,20 +1512,13 @@ function draw_children_clipped!(fiber, renderer, rect)
     if clip.w <= 0 || clip.h <= 0
         return nothing
     end
-    SDL3.SetRenderClipRect(renderer, clip)
-    RENDER_CLIP[renderer] = clip
+    set_render_clip!(renderer, clip)
     try
         for child in fiber.children
             draw!(child, renderer)
         end
     finally
-        if previous === nothing
-            SDL3.SetRenderClipRect(renderer, nothing)
-            delete!(RENDER_CLIP, renderer)
-        else
-            SDL3.SetRenderClipRect(renderer, previous)
-            RENDER_CLIP[renderer] = previous
-        end
+        restore_render_clip!(renderer, previous)
     end
     return nothing
 end
@@ -1519,6 +1591,18 @@ function draw!(fiber, renderer)
     if is_text(fiber)
         state = ensure_text!(fiber, renderer)
         x, y = fiber.rect[1], fiber.rect[2]
+        if GPU_MODE[]
+            # The GPU path: the text's pixels live in GPU textures, drawn
+            # with the texture pipeline.
+            for (i, texture) in enumerate(state.gpu_textures)
+                texture == C_NULL && continue
+                w, h = state.linewidths[i], state.lineheights[i]
+                (w <= 0 || h <= 0) && continue
+                gpu_record_texture!(texture, x, y + (i-1) * state.advance,
+                                    w, h)
+            end
+            return
+        end
         for (i, texture) in enumerate(state.textures)
             texture == C_NULL && continue
             w, h = state.linewidths[i], state.lineheights[i]
@@ -1728,6 +1812,13 @@ function draw_debug_overlay!(window_fiber, renderer)
     surface = SDL3.TTF_RenderText_Blended(
         font, text, SDL3.SDL_Color(230, 230, 235, 255))
     surface == C_NULL && return
+    if GPU_MODE[]
+        texture = gpu_texture_from_surface(GPU_STATE[].device, surface)
+        SDL3.DestroySurface(surface)
+        texture == C_NULL && return
+        gpu_record_texture!(texture, win_w - tw - pad, pad, tw, th)
+        return
+    end
     texture = SDL3.CreateTextureFromSurface(renderer, surface)
     SDL3.DestroySurface(surface)
     texture == C_NULL && return
@@ -1741,6 +1832,17 @@ end
 function draw_window!(fiber, present::Bool = true)
     state = fiber.host
     state isa WindowState || return
+    if GPU_MODE[]
+        # The GPU path: the frame records into the staging buffer and
+        # presents through the swapchain.
+        gpu_begin_frame(fiber) || return
+        for child in fiber.children
+            draw!(child, state.renderer)
+        end
+        gpu_end_frame(get(fiber.props, :background,
+                          DEFAULT_WINDOW_BACKGROUND))
+        return
+    end
     renderer = state.renderer
     set_color(renderer, get(fiber.props, :background, DEFAULT_WINDOW_BACKGROUND))
     SDL3.RenderClear(renderer)

@@ -11,7 +11,7 @@ Observables = "510215fc-4207-5dde-b226-833fc4488ee2"
 SDL3 = "d6436c51-22c4-47c5-9af2-69281707dbc3"
 
 [sources]
-SDL3 = {rev = "master", url = "https://github.com/CarpeNecopinum/SDL3.jl.git"}
+SDL3 = {path = "/home/cmattes/Development/SDL3.jl"}
 
 [compat]
 BenchmarkTools = "1.8.0"

@@ -49,3 +49,11 @@ A transition of the rendering backend (e.g. to SDL GPU) must keep the
 average frame time and the per-run allocations at or below this baseline on
 the same machine — re-run `benchmark_and_print(; frames = 300)` after the
 change and compare against this table.
+
+The SDL GPU transition (`render(...; gpu = true)`) is implemented behind this
+gate: `src/gpu.jl` records the draw primitives into a per-frame transfer
+buffer, uploads once per frame and replays the recorded commands inside a
+render pass on the swapchain. It requires a Vulkan-capable environment (the
+shaders ship as SPIR-V); on machines without one the run warns and falls
+back to the SDL renderer path above. Run the GPU benchmark on a
+Vulkan-capable machine and compare against this table.

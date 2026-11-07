@@ -209,14 +209,25 @@ function render(app; kwargs...)
     frames = get(kw, :frames, nothing)
     shot = get(kw, :screenshot, nothing)
     debug = get(kw, :debug, false)
+    gpu = get(kw, :gpu, false)
     kw = Base.structdiff(kw, (frames = nothing, screenshot = nothing,
-                              debug = nothing))
+                              debug = nothing, gpu = nothing))
     root = create_root(app, kw)
     root.mounted = true
     # The previous loop iteration's start: an iteration that took much longer
     # than the 250 ms wait cap stalled (freeze detection).
     last_iteration = time()
     DEBUG[] = debug
+    GPU_MODE[] = gpu
+    if gpu
+        init_backend()
+        try
+            gpu_init()
+        catch err
+            @warn "Rocks: SDL GPU unavailable — falling back to the SDL renderer" exception = err
+            GPU_MODE[] = false
+        end
+    end
     debug_renders[] = 0
     debug_last[] = time()
     try
@@ -329,6 +340,8 @@ function render(app; kwargs...)
         unmount!(root)
         RUNNING[] = false
         DEBUG[] = false
+        GPU_MODE[] && gpu_shutdown()
+        GPU_MODE[] = false
         shutdown_backend()
         empty!(TIMERS)
         empty!(PENDING_EFFECTS)
